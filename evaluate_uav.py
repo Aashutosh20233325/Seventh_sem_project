@@ -1,81 +1,3 @@
-# import pygame
-# from stable_baselines3 import PPO
-
-# from uav_env import UAVEnv
-
-
-# def main():
-#     env = UAVEnv(render_mode="human")
-#     model = PPO.load("uav_ppo")
-
-#     # Initialize the Pygame window before reading events.
-#     env.render()
-
-#     try:
-#         for episode in range(10):
-#             obs, info = env.reset()
-
-#             terminated = False
-#             truncated = False
-#             total_reward = 0.0
-
-#             while not terminated and not truncated:
-#                 # Keep the window responsive.
-#                 for event in pygame.event.get():
-#                     if event.type == pygame.QUIT:
-#                         return
-
-#                     if (
-#                         event.type == pygame.KEYDOWN
-#                         and event.key == pygame.K_ESCAPE
-#                     ):
-#                         return
-
-#                 action, _ = model.predict(
-#                     obs,
-#                     deterministic=True,
-#                 )
-
-#                 min_lidar = env.lidar_readings.min()
-
-#                 if min_lidar < 60:
-#                     print(
-#                         f"WARNING | step={env.current_step} "
-#                         f"min_lidar={min_lidar:.2f} "
-#                         f"action=[{action[0]:.3f}, {action[1]:.3f}] "
-#                         f"distance={env.distance_to_target():.2f}"
-#                     )
-
-#                 obs, reward, terminated, truncated, info = env.step(
-#                     action
-#                 )
-
-#                 if info["collision"]:
-#                     print("\nCOLLISION")
-#                     print("Position:", (env.x, env.y))
-#                     print("Heading:", env.theta)
-#                     print("Action:", action)
-#                     print("Minimum LiDAR:", env.lidar_readings.min())
-#                     print("LiDAR:", env.lidar_readings)
-
-#                 env.render()
-
-#                 total_reward += reward
-
-#             print(
-#                 f"Episode {episode + 1}: "
-#                 f"reward={total_reward:.2f}, "
-#                 f"steps={info['step']}, "
-#                 f"reached={info['reached_target']}, "
-#                 f"collision={info['collision']}"
-#             )
-
-#     finally:
-#         env.close()
-
-
-# if __name__ == "__main__":
-#     main()
 import pygame
 from stable_baselines3 import PPO
 
@@ -90,10 +12,21 @@ def main():
     # Initialize window
     env.render()
 
+    total_episodes = 50
+
+    successful_episodes = 0
+    collision_episodes = 0
+    timeout_episodes = 0
+
+    total_reward_all = 0.0
+    total_steps_all = 0
+
     try:
 
-        # Run 50 evaluation episodes
-        for episode in range(1, 51):
+        # ----------------------------------------------------------
+        # Run evaluation episodes
+        # ----------------------------------------------------------
+        for episode in range(1, total_episodes + 1):
 
             obs, info = env.reset()
 
@@ -125,12 +58,13 @@ def main():
                     deterministic=True
                 )
 
-                # Information BEFORE the action
+                # --------------------------------------------------
+                # Debug information
+                # --------------------------------------------------
                 min_lidar_before = env.lidar_readings.min()
                 distance_before = env.distance_to_target()
 
                 if min_lidar_before < 60:
-
                     print(
                         f"WARNING | "
                         f"episode={episode:2d} | "
@@ -140,7 +74,7 @@ def main():
                         f"speed={action[0]:6.3f} | "
                         f"turn={action[1]:6.3f}"
                     )
-                
+
                 if env.current_step % 20 == 0:
                     print(
                         f"Episode={episode} "
@@ -151,7 +85,8 @@ def main():
                         f"speed_action={action[0]:.4f} "
                         f"turn_action={action[1]:.4f}"
                     )
-                                # --------------------------------------------------
+
+                # --------------------------------------------------
                 # Environment step
                 # --------------------------------------------------
                 obs, reward, terminated, truncated, info = env.step(
@@ -214,18 +149,154 @@ def main():
                     break
 
             # ------------------------------------------------------
-            # Episode result
+            # Determine episode result
+            # ------------------------------------------------------
+            reached = info["reached_target"]
+            collision = info["collision"]
+
+            if reached:
+                successful_episodes += 1
+                result = "SUCCESS"
+
+            elif collision:
+                collision_episodes += 1
+                result = "COLLISION"
+
+            elif truncated:
+                timeout_episodes += 1
+                result = "TIMEOUT"
+
+            else:
+                # This should normally never happen
+                timeout_episodes += 1
+                result = "UNKNOWN/TIMEOUT"
+
+            total_reward_all += total_reward
+            total_steps_all += info["step"]
+
+            # ------------------------------------------------------
+            # Episode summary
             # ------------------------------------------------------
             print(
-                f"Episode {episode}: "
-                f"reward={total_reward:.2f}, "
-                f"steps={info['step']}, "
-                f"reached={info['reached_target']}, "
-                f"collision={info['collision']}"
+                f"\nEpisode {episode:2d} | "
+                f"{result:9s} | "
+                f"reward={total_reward:8.2f} | "
+                f"steps={info['step']:4d} | "
+                f"distance={info['distance_to_target']:7.2f}"
+            )
+
+            # ------------------------------------------------------
+            # Running statistics
+            # ------------------------------------------------------
+            success_rate = (
+                successful_episodes
+                / episode
+                * 100.0
+            )
+
+            collision_rate = (
+                collision_episodes
+                / episode
+                * 100.0
+            )
+
+            timeout_rate = (
+                timeout_episodes
+                / episode
+                * 100.0
+            )
+
+            print(
+                f"Running statistics after {episode} episodes:"
+            )
+
+            print(
+                f"  Success rate  : {success_rate:6.2f}%"
+            )
+
+            print(
+                f"  Collision rate: {collision_rate:6.2f}%"
+            )
+
+            print(
+                f"  Timeout rate  : {timeout_rate:6.2f}%"
             )
 
     finally:
         env.close()
+
+    # ==========================================================
+    # FINAL RESULTS
+    # ==========================================================
+
+    average_reward = (
+        total_reward_all / total_episodes
+    )
+
+    average_steps = (
+        total_steps_all / total_episodes
+    )
+
+    success_rate = (
+        successful_episodes
+        / total_episodes
+        * 100.0
+    )
+
+    collision_rate = (
+        collision_episodes
+        / total_episodes
+        * 100.0
+    )
+
+    timeout_rate = (
+        timeout_episodes
+        / total_episodes
+        * 100.0
+    )
+
+    print("\n")
+    print("================================================")
+    print("              FINAL EVALUATION")
+    print("================================================")
+
+    print(
+        f"Total episodes   : {total_episodes}"
+    )
+
+    print(
+        f"Successful       : {successful_episodes}"
+    )
+
+    print(
+        f"Collisions       : {collision_episodes}"
+    )
+
+    print(
+        f"Timeouts         : {timeout_episodes}"
+    )
+
+    print(
+        f"Success rate     : {success_rate:.2f}%"
+    )
+
+    print(
+        f"Collision rate   : {collision_rate:.2f}%"
+    )
+
+    print(
+        f"Timeout rate     : {timeout_rate:.2f}%"
+    )
+
+    print(
+        f"Average reward   : {average_reward:.2f}"
+    )
+
+    print(
+        f"Average steps    : {average_steps:.2f}"
+    )
+
+    print("================================================")
 
 
 if __name__ == "__main__":

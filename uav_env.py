@@ -66,7 +66,16 @@ class UAVEnv(gym.Env):
             dtype=np.float32,
         )
         self.lidar_points = []
-        self.lidar_hits = []
+        self.lidar_hit_types = []
+        self.lidar_object_labels = np.zeros(
+            self.num_rays,
+            dtype=np.float32,
+        )
+
+        # Target information derived ONLY from LiDAR detection.
+        self.target_detected = False
+        self.target_lidar_distance = 0.0
+        self.target_lidar_angle = 0.0
 
         # ========================================================
         # TARGET
@@ -98,11 +107,22 @@ class UAVEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # 2 target features + 49 LiDAR + 2 previous-action values
+        # Observation:
+        #   49 LiDAR rays × 2 values:
+        #       normalized distance
+        #       object label
+        #   3 target-sensor values:
+        #       target_detected
+        #       target distance measured by LiDAR
+        #       target angle measured by the detecting ray
+        #   2 previous-action values
+        #
+        # Total = 49*2 + 3 + 2 = 103
+
         self.observation_space = spaces.Box(
             low=-1.0,
             high=1.0,
-            shape=(53,),
+            shape=(103,),
             dtype=np.float32,
         )
 
@@ -126,6 +146,7 @@ class UAVEnv(gym.Env):
     # GEOMETRY / LIDAR
     # ============================================================
 
+  
     @staticmethod
     def ray_rectangle_intersection(
         origin_x,
@@ -135,7 +156,10 @@ class UAVEnv(gym.Env):
         rect,
         max_distance,
     ):
-        """Return the nearest ray/rectangle intersection distance."""
+        """
+        Return the nearest ray/rectangle intersection distance,
+        or None if the ray does not intersect the rectangle.
+        """
 
         xmin = rect.left
         xmax = rect.right
@@ -144,6 +168,7 @@ class UAVEnv(gym.Env):
 
         t_values = []
 
+        # Intersections with vertical sides
         if abs(direction_x) > 1e-9:
             t = (xmin - origin_x) / direction_x
             if 0 <= t <= max_distance:
@@ -157,6 +182,7 @@ class UAVEnv(gym.Env):
                 if ymin <= y_hit <= ymax:
                     t_values.append(t)
 
+        # Intersections with horizontal sides
         if abs(direction_y) > 1e-9:
             t = (ymin - origin_y) / direction_y
             if 0 <= t <= max_distance:
@@ -175,25 +201,202 @@ class UAVEnv(gym.Env):
 
         return min(t_values)
 
+    @staticmethod
+    def ray_circle_intersection(
+        origin_x,
+        origin_y,
+        direction_x,
+        direction_y,
+        center_x,
+        center_y,
+        radius,
+        max_distance,
+    ):
+        """
+        Return the nearest intersection distance between
+        a ray and a circle.
+
+        Returns None if there is no intersection.
+        """
+
+        # Vector from ray origin to circle center
+        oc_x = center_x - origin_x
+        oc_y = center_y - origin_y
+
+        # Projection of oc onto ray direction
+        t_ca = (
+            oc_x * direction_x
+            + oc_y * direction_y
+        )
+
+        # Circle is behind the ray
+        if t_ca < 0:
+            return None
+
+        # Squared distance from circle center to ray
+        d2 = (
+            oc_x * oc_x
+            + oc_y * oc_y
+            - t_ca * t_ca
+        )
+
+        radius_sq = radius * radius
+
+        if d2 > radius_sq:
+            return None
+
+        # Distance from projection point to intersection
+        t_hc = math.sqrt(
+            max(0.0, radius_sq - d2)
+        )
+
+        # Nearest intersection
+        t0 = t_ca - t_hc
+
+        if t0 < 0:
+            t0 = t_ca + t_hc
+
+        if 0 <= t0 <= max_distance:
+            return t0
+
+        return None
+
+    # def lidar_scan(self):
+    #     """Perform a 49-ray 360-degree LiDAR scan."""
+
+    #     readings = []
+    #     hit_points = []
+    #     hit_obstacle = []
+
+    #     angle_step = 2.0 * math.pi / self.num_rays
+
+    #     for i in range(self.num_rays):
+    #         angle = self.theta + i * angle_step
+
+    #         dx = math.cos(angle)
+    #         dy = math.sin(angle)
+
+    #         closest_distance = self.lidar_max_distance
+
+    #         # Check obstacles.
+    #         for obstacle in self.obstacles:
+    #             distance = self.ray_rectangle_intersection(
+    #                 self.x,
+    #                 self.y,
+    #                 dx,
+    #                 dy,
+    #                 obstacle,
+    #                 self.lidar_max_distance,
+    #             )
+
+    #             if distance is not None:
+    #                 closest_distance = min(
+    #                     closest_distance,
+    #                     distance,
+    #                 )
+
+    #         # Check simulation boundaries.
+    #         if dx > 1e-9:
+    #             closest_distance = min(
+    #                 closest_distance,
+    #                 (self.width - self.x) / dx,
+    #             )
+    #         elif dx < -1e-9:
+    #             closest_distance = min(
+    #                 closest_distance,
+    #                 (0.0 - self.x) / dx,
+    #             )
+
+    #         if dy > 1e-9:
+    #             closest_distance = min(
+    #                 closest_distance,
+    #                 (self.height - self.y) / dy,
+    #             )
+    #         elif dy < -1e-9:
+    #             closest_distance = min(
+    #                 closest_distance,
+    #                 (0.0 - self.y) / dy,
+    #             )
+
+    #         closest_distance = max(
+    #             0.0,
+    #             closest_distance,
+    #         )
+
+    #         hit = (
+    #             closest_distance
+    #             < self.lidar_max_distance - 1.0
+    #         )
+
+    #         end_x = self.x + dx * closest_distance
+    #         end_y = self.y + dy * closest_distance
+
+    #         readings.append(closest_distance)
+    #         hit_points.append((end_x, end_y))
+    #         hit_obstacle.append(hit)
+
+    #     self.lidar_readings = np.asarray(
+    #         readings,
+    #         dtype=np.float32,
+    #     )
+    #     self.lidar_points = hit_points
+    #     self.lidar_hits = hit_obstacle
+
+    #     return self.lidar_readings
     def lidar_scan(self):
-        """Perform a 49-ray 360-degree LiDAR scan."""
+        """
+        Perform a 49-ray 360-degree LiDAR scan.
+
+        For every ray we store:
+            - distance to the first object/boundary
+            - object label
+
+        Object label:
+            0.0 = obstacle / boundary / no target
+            1.0 = target
+
+        Target information is exposed separately ONLY when one or
+        more LiDAR rays actually detect the target.
+        """
 
         readings = []
+        object_labels = []
         hit_points = []
-        hit_obstacle = []
+        hit_types = []
+
+        # Reset target detection for this scan.
+        self.target_detected = False
+        self.target_lidar_distance = 0.0
+        self.target_lidar_angle = 0.0
 
         angle_step = 2.0 * math.pi / self.num_rays
 
+        # Keep the best (nearest) target detection if multiple rays
+        # intersect the target.
+        best_target_distance = None
+        best_target_angle = 0.0
+
         for i in range(self.num_rays):
+
+            # Ray 0 is aligned with the UAV heading.
+            relative_angle = i * angle_step
+
+            # Convert the ray angle into [-pi, pi].
+            if relative_angle > math.pi:
+                relative_angle -= 2.0 * math.pi
+
             angle = self.theta + i * angle_step
 
             dx = math.cos(angle)
             dy = math.sin(angle)
 
-            closest_distance = self.lidar_max_distance
+            # ----------------------------------------------------
+            # Closest obstacle distance
+            # ----------------------------------------------------
+            obstacle_distance = self.lidar_max_distance
 
-            # Check obstacles.
             for obstacle in self.obstacles:
+
                 distance = self.ray_rectangle_intersection(
                     self.x,
                     self.y,
@@ -204,57 +407,123 @@ class UAVEnv(gym.Env):
                 )
 
                 if distance is not None:
-                    closest_distance = min(
-                        closest_distance,
+                    obstacle_distance = min(
+                        obstacle_distance,
                         distance,
                     )
 
-            # Check simulation boundaries.
+            # ----------------------------------------------------
+            # Boundary distance
+            # ----------------------------------------------------
+            boundary_distance = self.lidar_max_distance
+
             if dx > 1e-9:
-                closest_distance = min(
-                    closest_distance,
+                boundary_distance = min(
+                    boundary_distance,
                     (self.width - self.x) / dx,
                 )
+
             elif dx < -1e-9:
-                closest_distance = min(
-                    closest_distance,
+                boundary_distance = min(
+                    boundary_distance,
                     (0.0 - self.x) / dx,
                 )
 
             if dy > 1e-9:
-                closest_distance = min(
-                    closest_distance,
+                boundary_distance = min(
+                    boundary_distance,
                     (self.height - self.y) / dy,
                 )
+
             elif dy < -1e-9:
-                closest_distance = min(
-                    closest_distance,
+                boundary_distance = min(
+                    boundary_distance,
                     (0.0 - self.y) / dy,
                 )
 
+            # ----------------------------------------------------
+            # Target intersection
+            # ----------------------------------------------------
+            target_distance = self.ray_circle_intersection(
+                self.x,
+                self.y,
+                dx,
+                dy,
+                float(self.target[0]),
+                float(self.target[1]),
+                self.target_radius,
+                self.lidar_max_distance,
+            )
+
+            # The first thing along the ray is what the LiDAR sees.
+            closest_distance = min(
+                obstacle_distance,
+                boundary_distance,
+            )
+
+            object_label = 0.0
+            hit_type = "obstacle"
+
+            # Target is detectable only if it is not occluded by
+            # an obstacle or the environment boundary.
+            if (
+                target_distance is not None
+                and target_distance < closest_distance
+            ):
+                closest_distance = target_distance
+                object_label = 1.0
+                hit_type = "target"
+
+                if (
+                    best_target_distance is None
+                    or target_distance < best_target_distance
+                ):
+                    best_target_distance = target_distance
+                    best_target_angle = relative_angle
+
+            # ----------------------------------------------------
+            # Save ray information
+            # ----------------------------------------------------
             closest_distance = max(
                 0.0,
                 closest_distance,
-            )
-
-            hit = (
-                closest_distance
-                < self.lidar_max_distance - 1.0
             )
 
             end_x = self.x + dx * closest_distance
             end_y = self.y + dy * closest_distance
 
             readings.append(closest_distance)
+            object_labels.append(object_label)
             hit_points.append((end_x, end_y))
-            hit_obstacle.append(hit)
+            hit_types.append(hit_type)
 
+        # --------------------------------------------------------
+        # Store LiDAR results
+        # --------------------------------------------------------
         self.lidar_readings = np.asarray(
             readings,
             dtype=np.float32,
         )
+
+        self.lidar_object_labels = np.asarray(
+            object_labels,
+            dtype=np.float32,
+        )
+
         self.lidar_points = hit_points
-        self.lidar_hits = hit_obstacle
+        self.lidar_hit_types = hit_types
+
+        # --------------------------------------------------------
+        # Store target information ONLY if LiDAR detected it
+        # --------------------------------------------------------
+        if best_target_distance is not None:
+            self.target_detected = True
+            self.target_lidar_distance = float(
+                best_target_distance
+            )
+            self.target_lidar_angle = float(
+                best_target_angle
+            )
 
         return self.lidar_readings
 
@@ -422,41 +691,81 @@ class UAVEnv(gym.Env):
     # ============================================================
 
     def get_observation(self):
-        """Return the normalized 53-dimensional observation."""
+        """
+        Return the 103-dimensional observation.
 
-        target_distance = self.distance_to_target()
+        LiDAR:
+            49 rays × [normalized distance, object label]
 
-        target_distance_norm = min(
-            target_distance
-            / math.hypot(self.width, self.height),
-            1.0,
-        )
+        Target information:
+            - target_detected: 0 or 1
+            - target distance: ONLY from a detecting LiDAR ray
+            - target angle: ONLY from the detecting LiDAR ray
 
-        target_angle_norm = (
-            self.target_relative_angle() / math.pi
-        )
+        If the target is not detected:
+            target_detected = 0
+            target_distance = 0
+            target_angle = 0
 
-        lidar_norm = np.clip(
+        Plus the previous 2D action.
+        """
+
+        lidar_distance_norm = np.clip(
             self.lidar_readings / self.lidar_max_distance,
             0.0,
             1.0,
         )
 
-        observation = np.concatenate(
+        observation = []
+
+        # 49 × [distance, object label]
+        for distance, object_label in zip(
+            lidar_distance_norm,
+            self.lidar_object_labels,
+        ):
+            observation.append(float(distance))
+            observation.append(float(object_label))
+
+        # --------------------------------------------------------
+        # Target information from LiDAR only
+        # --------------------------------------------------------
+        if self.target_detected:
+            target_detected = 1.0
+
+            target_distance_norm = np.clip(
+                self.target_lidar_distance
+                / self.lidar_max_distance,
+                0.0,
+                1.0,
+            )
+
+            target_angle_norm = (
+                self.target_lidar_angle / math.pi
+            )
+        else:
+            target_detected = 0.0
+            target_distance_norm = 0.0
+            target_angle_norm = 0.0
+
+        observation.extend(
             [
-                np.array(
-                    [
-                        target_distance_norm,
-                        target_angle_norm,
-                    ],
-                    dtype=np.float32,
-                ),
-                lidar_norm.astype(np.float32),
-                self.previous_action.astype(np.float32),
+                target_detected,
+                target_distance_norm,
+                target_angle_norm,
             ]
         )
 
-        return observation.astype(np.float32)
+        # Previous action
+        observation.extend(
+            self.previous_action.astype(np.float32)
+        )
+
+        observation = np.asarray(
+            observation,
+            dtype=np.float32,
+        )
+
+        return observation
 
     # ============================================================
     # GYMNASIUM API
@@ -492,6 +801,9 @@ class UAVEnv(gym.Env):
         info = {
             "distance_to_target": self.distance_to_target(),
             "target_angle": self.target_relative_angle(),
+            "target_detected": self.target_detected,
+            "target_lidar_distance": self.target_lidar_distance,
+            "target_lidar_angle": self.target_lidar_angle,
             "min_lidar": float(np.min(self.lidar_readings)),
             "step": self.current_step,
         }
@@ -505,8 +817,8 @@ class UAVEnv(gym.Env):
         )
         action = np.clip(
             action,
-            -1.0,
-            1.0,
+            self.action_space.low,
+            self.action_space.high,
         )
 
         # --------------------------------------------------------
@@ -676,7 +988,7 @@ class UAVEnv(gym.Env):
             )
 
             pygame.display.set_caption(
-                "UAV Search Environment - Step 1"
+                "UAV Search Environment - LiDAR Target Detection"
             )
 
             self.clock = pygame.time.Clock()
@@ -729,6 +1041,7 @@ class UAVEnv(gym.Env):
         lidar_clear = (80, 170, 230)
         lidar_hit = (230, 100, 70)
         lidar_closest = (180, 50, 200)
+        lidar_target = (20, 180, 70)
 
         if len(self.lidar_readings) == 0:
             return
@@ -737,16 +1050,19 @@ class UAVEnv(gym.Env):
             np.argmin(self.lidar_readings)
         )
 
-        for i, (point, hit) in enumerate(
+        for i, (point, hit_type) in enumerate(
             zip(
                 self.lidar_points,
-                self.lidar_hits,
+                self.lidar_hit_types,
             )
         ):
-            if i == closest_index:
+            if hit_type == "target":
+                color = lidar_target
+                width = 4
+            elif i == closest_index:
                 color = lidar_closest
                 width = 4
-            elif hit:
+            elif hit_type == "obstacle":
                 color = lidar_hit
                 width = 2
             else:
@@ -761,7 +1077,7 @@ class UAVEnv(gym.Env):
                 width,
             )
 
-            if hit:
+            if hit_type in ("target", "obstacle"):
                 pygame.draw.circle(
                     self.screen,
                     color,
@@ -937,14 +1253,18 @@ class UAVEnv(gym.Env):
                 f"{math.degrees(self.theta) % 360:7.1f}°"
             ),
             "",
-            "TARGET",
+            "TARGET SENSOR",
+            (
+                "Detected: "
+                f"{'YES' if self.target_detected else 'NO'}"
+            ),
             (
                 "Distance: "
-                f"{self.distance_to_target():7.1f}"
+                f"{self.target_lidar_distance if self.target_detected else 0.0:7.1f}"
             ),
             (
                 "Angle   : "
-                f"{math.degrees(self.target_relative_angle()):7.1f}°"
+                f"{math.degrees(self.target_lidar_angle) if self.target_detected else 0.0:7.1f}°"
             ),
             "",
             "LiDAR",
