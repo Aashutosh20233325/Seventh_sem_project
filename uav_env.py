@@ -59,6 +59,9 @@ class UAVEnv(gym.Env):
         # ========================================================
         self.num_rays = 49
         self.lidar_max_distance = 220.0
+        # Mild anticipation for obstacle and boundary readings.  The
+        # full UAV radius remains exclusively in collision geometry.
+        self.lidar_safety_margin = 3.0
 
         self.lidar_readings = np.full(
             self.num_rays,
@@ -347,8 +350,11 @@ class UAVEnv(gym.Env):
         """
         Perform a 49-ray 360-degree LiDAR scan.
 
+        Obstacle and boundary distances use a small safety margin rather
+        than the full UAV radius. Target distances remain unadjusted.
+
         For every ray we store:
-            - distance to the first object/boundary
+            - clearance distance to the first object/boundary
             - object label
 
         Object label:
@@ -456,7 +462,7 @@ class UAVEnv(gym.Env):
             )
 
             # The first thing along the ray is what the LiDAR sees.
-            closest_distance = min(
+            closest_center_distance = min(
                 obstacle_distance,
                 boundary_distance,
             )
@@ -468,9 +474,9 @@ class UAVEnv(gym.Env):
             # an obstacle or the environment boundary.
             if (
                 target_distance is not None
-                and target_distance < closest_distance
+                and target_distance < closest_center_distance
             ):
-                closest_distance = target_distance
+                closest_center_distance = target_distance
                 object_label = 1.0
                 hit_type = "target"
 
@@ -481,18 +487,23 @@ class UAVEnv(gym.Env):
                     best_target_distance = target_distance
                     best_target_angle = relative_angle
 
+            # Keep target measurements as true LiDAR distances. Apply
+            # only a mild warning margin to obstacles and boundaries.
+            if object_label == 1.0:
+                clearance_distance = closest_center_distance
+            else:
+                clearance_distance = max(
+                    0.0,
+                    closest_center_distance - self.lidar_safety_margin,
+                )
+
             # ----------------------------------------------------
             # Save ray information
             # ----------------------------------------------------
-            closest_distance = max(
-                0.0,
-                closest_distance,
-            )
+            end_x = self.x + dx * clearance_distance
+            end_y = self.y + dy * clearance_distance
 
-            end_x = self.x + dx * closest_distance
-            end_y = self.y + dy * closest_distance
-
-            readings.append(closest_distance)
+            readings.append(clearance_distance)
             object_labels.append(object_label)
             hit_points.append((end_x, end_y))
             hit_types.append(hit_type)
@@ -518,9 +529,9 @@ class UAVEnv(gym.Env):
         # --------------------------------------------------------
         if best_target_distance is not None:
             self.target_detected = True
-            self.target_lidar_distance = float(
-                best_target_distance
-            )
+
+            self.target_lidar_distance = float(best_target_distance)
+
             self.target_lidar_angle = float(
                 best_target_angle
             )
@@ -815,6 +826,7 @@ class UAVEnv(gym.Env):
             action,
             dtype=np.float32,
         )
+
         action = np.clip(
             action,
             self.action_space.low,
@@ -825,9 +837,6 @@ class UAVEnv(gym.Env):
         # Measurements before movement
         # --------------------------------------------------------
         old_distance = self.distance_to_target()
-        old_min_lidar = float(
-            np.min(self.lidar_readings)
-        )
 
         # --------------------------------------------------------
         # Convert normalized action to physical values
@@ -843,110 +852,91 @@ class UAVEnv(gym.Env):
         )
 
         # --------------------------------------------------------
-        # Move
+        # Move using smaller substeps
+        #
+        # One RL action is still taken per environment step,
+        # but the physical movement is checked several times.
+        # This reduces corner-clipping during turns.
         # --------------------------------------------------------
-        self.theta += (
-            angular_velocity
-            * self.dt
-        )
+        substeps = 5
+        sub_dt = self.dt / substeps
 
-        self.x += (
-            velocity
-            * math.cos(self.theta)
-            * self.dt
-        )
+        collision = False
 
-        self.y += (
-            velocity
-            * math.sin(self.theta)
-            * self.dt
-        )
+        for _ in range(substeps):
+
+            # Update orientation
+            self.theta += (
+                angular_velocity
+                * sub_dt
+            )
+
+            # Update position
+            self.x += (
+                velocity
+                * math.cos(self.theta)
+                * sub_dt
+            )
+
+            self.y += (
+                velocity
+                * math.sin(self.theta)
+                * sub_dt
+            )
+
+            # Check collision immediately after this small movement
+            if self.check_collision():
+                collision = True
+                break
 
         self.previous_action = action.copy()
         self.current_step += 1
 
         # --------------------------------------------------------
-        # Check state after movement
+        # Check final state
         # --------------------------------------------------------
-        collision = self.check_collision()
-
         new_distance = self.distance_to_target()
 
         reached = (
             new_distance <= self.target_radius
         )
 
-        # Update LiDAR.
+        # Update LiDAR after movement
         self.lidar_scan()
 
         new_min_lidar = float(
             np.min(self.lidar_readings)
         )
 
-        # # --------------------------------------------------------
-        # # Reward
-        # # --------------------------------------------------------
-        # reward = -0.05  # small time penalty
-
-        # # Target progress.
-        # reward += (
-        #     old_distance
-        #     - new_distance
-        # )
-
-        # # --------------------------------------------------------
-        # # Obstacle avoidance shaping
-        # # --------------------------------------------------------
-        # SAFE_DISTANCE = 70.0
-
-        # if new_min_lidar < SAFE_DISTANCE:
-        #     danger = (
-        #         SAFE_DISTANCE
-        #         - new_min_lidar
-        #     )
-
-        #     # Penalize getting too close.
-        #     reward -= 0.8 * danger
-
-        #     # Reward increasing clearance when already near
-        #     # an obstacle.
-        #     lidar_improvement = (
-        #         new_min_lidar
-        #         - old_min_lidar
-        #     )
-
-        #     reward += 0.5 * lidar_improvement
-
-        # # Collision is strongly penalized.
-        # if collision:
-        #     reward -= 100.0
-
-        # # Successful arrival.
-        # if reached:
-        #     reward += 100.0
-       
         # --------------------------------------------------------
         # Reward
         # --------------------------------------------------------
 
-        # Time penalty: encourages completing the task quickly
+        # Small time penalty
         reward = -0.1
+        if velocity > 0.1:
+            reward += 0.05
 
-        # Reward getting closer to the target
-        reward += old_distance - new_distance
+        # Reward progress toward target
+        reward += 2.0 * (
+            old_distance
+            - new_distance
+        )
 
         # Reward forward movement
-        if velocity > 0:
-            reward += 0.5
+        
 
-        # Strong collision penalty
+        # Collision penalty
         if collision:
             reward -= 100.0
 
-        # Strong target reward
+        # Target reached reward
         if reached:
             reward += 100.0
 
+        # --------------------------------------------------------
+        # Episode termination
+        # --------------------------------------------------------
         terminated = (
             collision
             or reached
@@ -957,8 +947,14 @@ class UAVEnv(gym.Env):
             >= self.max_steps
         )
 
+        # --------------------------------------------------------
+        # Observation
+        # --------------------------------------------------------
         observation = self.get_observation()
 
+        # --------------------------------------------------------
+        # Information
+        # --------------------------------------------------------
         info = {
             "distance_to_target": new_distance,
             "collision": collision,
@@ -975,9 +971,9 @@ class UAVEnv(gym.Env):
             info,
         )
 
-    # ============================================================
-    # RENDERING
-    # ============================================================
+        # ============================================================
+        # RENDERING
+        # ============================================================
 
     def _ensure_rendering(self):
         if self.screen is None:
