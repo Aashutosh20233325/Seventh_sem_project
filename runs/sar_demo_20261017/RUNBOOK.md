@@ -80,6 +80,14 @@ against the current stack: the local script uses `pkill -x px4`. Do not launch a
 second make target against the same build rootfs; an isolated rootfs and launch
 path must first be established.
 
+Isolation planning note: Gazebo's local helper supports a separate
+`GZ_PARTITION`, and another XRCE agent can listen on a distinct UDP port.
+However, `MicroXRCEAgent -d` selects its discovery port; it does not set the DDS
+domain. Before creating an isolated second client, confirm the local PX4
+UXRCE-DDS client domain/namespace configuration and provide a distinct PX4
+working/rootfs path for parameters and logs. The multi-instance helper is unsafe
+for this shared session because it runs `pkill -x px4`.
+
 The final read-only status sample (about 12:41:31 UTC on 2026-10-17) was fresh
 and reported `arming_state=1`, `nav_state=14`, `failsafe=false`,
 `pre_flight_checks_pass=false`. Land detection reported `landed=true`,
