@@ -94,9 +94,13 @@ class FakeNode:
         self.action = np.zeros(2, dtype=np.float32)
         self.phase = "VELOCITY"
         self.observation_counter = 1
+        self.latest_observation = np.zeros(54, dtype=np.float32)
+        self.observation_received_at = time.monotonic()
         self.x = 0.0
         self.y = 0.0
         self.z = -1.0
+        self.heading = 0.0
+        self.position_valid = True
         self.roll = 0.0
         self.pitch = 0.0
         self.failsafe = False
@@ -117,6 +121,7 @@ class FakeNode:
         self.takeoff_setpoint_count = 20
         self.takeoff_stream_started_at = time.monotonic() - 1.2
         self.takeoff_stream_last_at = time.monotonic()
+        self.px4_setpoint_subscribers = True
         self.command_ack_counter = 0
         self.command_ack_history = []
         self.mode_ack_result = 0
@@ -132,6 +137,9 @@ class FakeNode:
     def land(self):
         self.land_calls += 1
         self.landing_complete = False
+
+    def has_px4_setpoint_subscribers(self):
+        return self.px4_setpoint_subscribers
 
     def _ack(self, command, result):
         self.command_ack_counter += 1
@@ -431,6 +439,19 @@ def test_close_waits_for_landed_and_disarmed_before_cleanup(monkeypatch):
     assert env.spin_thread.join_calls == 1
 
 
+def test_close_landing_wait_is_bounded_above_observed_sitl_delay(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_close_environment(module)
+    del env.LAND_WAIT_TIMEOUT
+    monkeypatch.setattr(module.rclpy, "ok", lambda: False)
+    observed_timeouts = []
+    env._wait_until_landed = lambda timeout: observed_timeouts.append(timeout)
+
+    env.close()
+
+    assert observed_timeouts == [30.0]
+
+
 @pytest.mark.parametrize("telemetry", ["missing", "stale"])
 def test_close_timeout_does_not_claim_landing(monkeypatch, telemetry):
     module = load_environment(monkeypatch)
@@ -601,11 +622,170 @@ def test_episode_endings_enter_safe_state(
 def test_takeoff_waits_for_acknowledged_mode_and_arm_transitions(monkeypatch):
     module = load_environment(monkeypatch)
     env = make_takeoff_environment(module)
+    env.node.x = 1.25
+    env.node.y = -0.75
 
     env._takeoff()
 
     assert env.node.phase == "VELOCITY"
     assert env.node.arm_calls == 1
+    assert env.node.takeoff_target_x == 1.25
+    assert env.node.takeoff_target_y == -0.75
+
+
+def test_takeoff_refuses_invalid_local_position_before_offboard(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_takeoff_environment(module)
+    env.node.position_valid = False
+
+    with pytest.raises(RuntimeError, match="local-position telemetry.*invalid"):
+        env._takeoff()
+
+    assert env.node.phase == "VELOCITY"
+    assert env.node.command_ack_counter == 0
+    assert env.node.arm_calls == 0
+
+
+def test_takeoff_position_setpoint_holds_current_xy_and_keeps_altitude_gate(
+    monkeypatch,
+):
+    module = load_environment(monkeypatch)
+
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.setpoint_pub = Publisher()
+    node.timestamp = lambda: 123
+
+    module.PX4ControllerNode.publish_position_setpoint(
+        node,
+        z_target=-1.0,
+        x_target=-0.4,
+        y_target=0.25,
+    )
+
+    assert node.setpoint_pub.messages[0].position == [-0.4, 0.25, -1.0]
+
+
+def test_observation_wait_rejects_cached_stale_array(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env._wait_for_observation = module.PX4UAVEnv._wait_for_observation.__get__(env)
+    env.node.observation_received_at = time.monotonic() - 2.0
+
+    with pytest.raises(TimeoutError, match="/uav/observation"):
+        env._wait_for_observation(timeout=0.01)
+
+
+def test_observation_callback_rejects_non_finite_values(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.condition = threading.Condition()
+    node.observation_counter = 0
+    node.latest_observation = None
+    node.observation_received_at = None
+
+    message = SimpleNamespace(data=[0.0] * 53 + [float("nan")])
+    module.PX4ControllerNode.observation_callback(node, message)
+
+    assert node.observation_counter == 0
+    assert node.latest_observation is None
+
+
+def test_target_world_position_is_converted_to_px4_ned_for_reward(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = module.PX4UAVEnv.__new__(module.PX4UAVEnv)
+    env.node = SimpleNamespace(x=-3.0, y=3.0)
+
+    assert env._distance_to_target() == pytest.approx(0.0)
+
+
+def test_positive_speed_without_progress_gets_no_speed_bonus(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    raw = np.full(54, 5.0, dtype=np.float32)
+    env._wait_for_observation = lambda **kwargs: raw
+    env._distance_to_target = lambda: 10.0
+
+    _, reward, terminated, truncated, _ = env._step_after_action(
+        np.array([0.8, 0.0], dtype=np.float32),
+        old_distance=10.0,
+        previous_counter=env.node.observation_counter,
+    )
+
+    assert reward == pytest.approx(-0.1)
+    assert not terminated
+    assert not truncated
+
+
+def test_safe_state_serializes_zero_action_before_land_setpoints(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.node.arming_state = 2
+    env.node.action[:] = [0.8, 0.5]
+    env.node.phase = "VELOCITY"
+    published_velocity = []
+    env.node.publish_offboard_mode = lambda position_mode: None
+    env.node.publish_velocity_setpoint = lambda: published_velocity.append(
+        env.node.action.copy()
+    )
+
+    env._enter_safe_state()
+    module.PX4ControllerNode.control_loop(env.node)
+
+    assert env.node.phase == "LAND"
+    np.testing.assert_array_equal(published_velocity[0], [0.0, 0.0])
+
+
+def test_safe_state_waits_for_inflight_velocity_publish_then_stops_old_action(
+    monkeypatch,
+):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.node.arming_state = 2
+    env.node.action[:] = [0.8, 0.5]
+    env.node.phase = "VELOCITY"
+    publishing = threading.Event()
+    release_publish = threading.Event()
+    safe_state_done = threading.Event()
+    published_actions = []
+    env.node.publish_offboard_mode = lambda position_mode: None
+
+    def block_first_velocity_publish():
+        published_actions.append(env.node.action.copy())
+        if len(published_actions) == 1:
+            publishing.set()
+            assert release_publish.wait(timeout=1.0)
+
+    env.node.publish_velocity_setpoint = block_first_velocity_publish
+    timer_thread = threading.Thread(
+        target=module.PX4ControllerNode.control_loop,
+        args=(env.node,),
+    )
+    timer_thread.start()
+    assert publishing.wait(timeout=1.0)
+
+    safe_thread = threading.Thread(
+        target=lambda: (env._enter_safe_state(), safe_state_done.set())
+    )
+    safe_thread.start()
+    time.sleep(0.01)
+    assert not safe_state_done.is_set()
+
+    release_publish.set()
+    timer_thread.join(timeout=1.0)
+    safe_thread.join(timeout=1.0)
+    assert safe_state_done.is_set()
+
+    module.PX4ControllerNode.control_loop(env.node)
+    assert env.node.phase == "LAND"
+    np.testing.assert_allclose(published_actions[0], [0.8, 0.5])
+    np.testing.assert_array_equal(published_actions[1], [0.0, 0.0])
 
 
 def test_command_ack_subscription_matches_px4_dds_topic(monkeypatch):
@@ -1028,4 +1208,17 @@ def test_takeoff_setpoint_stream_gate_requires_duration_and_samples(monkeypatch)
 
     env.node.takeoff_setpoint_count = 2
     with pytest.raises(TimeoutError, match="setpoint stream"):
+        env._wait_for_takeoff_setpoint_stream()
+
+
+def test_takeoff_setpoint_stream_requires_px4_topic_subscriptions(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_takeoff_environment(module)
+    env._wait_for_takeoff_setpoint_stream = (
+        module.PX4UAVEnv._wait_for_takeoff_setpoint_stream.__get__(env)
+    )
+    env.TAKEOFF_STREAM_TIMEOUT = 0.02
+    env.node.px4_setpoint_subscribers = False
+
+    with pytest.raises(TimeoutError, match="PX4 topic subscriptions"):
         env._wait_for_takeoff_setpoint_stream()

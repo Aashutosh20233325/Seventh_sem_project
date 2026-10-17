@@ -1,4 +1,6 @@
 import math
+import threading
+import time
 import rclpy
 
 from rclpy.node import Node
@@ -11,6 +13,12 @@ from px4_msgs.msg import VehicleLocalPosition
 import gz.transport13
 from gz.msgs10.pose_v_pb2 import Pose_V
 
+from observation_geometry import (
+    quaternion_yaw,
+    required_inputs_fresh,
+    target_bearing_in_sensor_frame,
+)
+
 
 LIDAR_TOPIC = "/world/walls/model/x500_lidar_2d_0/link/link/sensor/lidar_2d_v2/scan"
 POSE_TOPIC = "/world/walls/pose/info"
@@ -18,6 +26,11 @@ POSE_TOPIC = "/world/walls/pose/info"
 OUTPUT_TOPIC = "/uav/observation"
 
 NUM_SECTORS = 49
+UAV_MODEL_NAME = "x500_lidar_2d_0"
+TARGET_MODEL_NAME = "target"
+# The model SDF gives the fixed lidar joint and sensor a zero yaw offset.
+LIDAR_YAW_OFFSET = 0.0
+INPUT_MAX_AGE = 0.5
 
 
 class ObservationPublisher(Node):
@@ -32,6 +45,15 @@ class ObservationPublisher(Node):
         self.target_y = None
 
         self.scan = None
+
+        self._input_lock = threading.Lock()
+        self.uav_yaw = None
+        self.scan_valid = False
+        self.pose_valid = False
+        self.position_valid = False
+        self.scan_received_at = None
+        self.pose_received_at = None
+        self.position_received_at = None
 
         # --------------------------------------------------
         # PX4 QoS
@@ -106,46 +128,107 @@ class ObservationPublisher(Node):
     # ======================================================
 
     def position_callback(self, msg):
+        now = time.monotonic()
+        try:
+            valid = (
+                bool(msg.xy_valid)
+                and math.isfinite(float(msg.x))
+                and math.isfinite(float(msg.y))
+            )
+        except (AttributeError, TypeError, ValueError):
+            valid = False
 
-        self.uav_x = msg.x
-        self.uav_y = msg.y
+        with self._input_lock:
+            self.position_received_at = now
+            self.position_valid = valid
 
     # ======================================================
     # LiDAR
     # ======================================================
 
     def lidar_callback(self, msg):
+        now = time.monotonic()
+        try:
+            scan_parameters = (
+                float(msg.angle_min),
+                float(msg.angle_max),
+                float(msg.angle_increment),
+                float(msg.range_min),
+                float(msg.range_max),
+            )
+            valid = (
+                len(msg.ranges) > 0
+                and all(math.isfinite(value) for value in scan_parameters)
+                and scan_parameters[1] > scan_parameters[0]
+                and scan_parameters[2] > 0.0
+                and scan_parameters[3] >= 0.0
+                and scan_parameters[4] >= scan_parameters[3]
+            )
+        except (AttributeError, TypeError, ValueError):
+            valid = False
 
-        self.scan = msg
+        with self._input_lock:
+            self.scan = msg
+            self.scan_valid = valid
+            self.scan_received_at = now
 
     # ======================================================
     # Gazebo target
     # ======================================================
 
     def pose_callback(self, msg):
-
+        now = time.monotonic()
+        uav_pose = None
+        target_pose = None
         for pose in msg.pose:
+            if pose.name == UAV_MODEL_NAME:
+                uav_pose = pose
+            elif pose.name == TARGET_MODEL_NAME:
+                target_pose = pose
 
-            if pose.name == "target":
+        valid = uav_pose is not None and target_pose is not None
+        if valid:
+            try:
+                uav_x = float(uav_pose.position.x)
+                uav_y = float(uav_pose.position.y)
+                uav_yaw = quaternion_yaw(
+                    uav_pose.orientation.x,
+                    uav_pose.orientation.y,
+                    uav_pose.orientation.z,
+                    uav_pose.orientation.w,
+                )
+                target_x = float(target_pose.position.x)
+                target_y = float(target_pose.position.y)
+                valid = all(math.isfinite(value) for value in (
+                    uav_x, uav_y, uav_yaw, target_x, target_y
+                ))
+            except (AttributeError, TypeError, ValueError):
+                valid = False
 
-                self.target_x = pose.position.x
-                self.target_y = pose.position.y
-
-                break
+        with self._input_lock:
+            self.pose_received_at = now
+            self.pose_valid = valid
+            if valid:
+                self.uav_x = uav_x
+                self.uav_y = uav_y
+                self.uav_yaw = uav_yaw
+                self.target_x = target_x
+                self.target_y = target_y
 
     # ======================================================
     # Convert 1080 LiDAR rays -> 49 sectors
     # ======================================================
 
-    def get_49_lidar(self):
+    def get_49_lidar(self, scan=None):
 
-        if self.scan is None:
+        scan = self.scan if scan is None else scan
+        if scan is None:
             return None
 
-        ranges = self.scan.ranges
+        ranges = scan.ranges
 
         sector_width = (
-            (self.scan.angle_max - self.scan.angle_min)
+            (scan.angle_max - scan.angle_min)
             / NUM_SECTORS
         )
 
@@ -154,7 +237,7 @@ class ObservationPublisher(Node):
         for sector in range(NUM_SECTORS):
 
             start_angle = (
-                self.scan.angle_min
+                scan.angle_min
                 + sector * sector_width
             )
 
@@ -166,16 +249,16 @@ class ObservationPublisher(Node):
             start_index = max(
                 0,
                 int(
-                    (start_angle - self.scan.angle_min)
-                    / self.scan.angle_increment
+                    (start_angle - scan.angle_min)
+                    / scan.angle_increment
                 )
             )
 
             end_index = min(
                 len(ranges),
                 int(
-                    (end_angle - self.scan.angle_min)
-                    / self.scan.angle_increment
+                    (end_angle - scan.angle_min)
+                    / scan.angle_increment
                 ) + 1
             )
 
@@ -186,11 +269,11 @@ class ObservationPublisher(Node):
                 r = ranges[i]
 
                 if not math.isfinite(r):
-                    r = self.scan.range_max
+                    r = scan.range_max
 
                 r = max(
-                    self.scan.range_min,
-                    min(r, self.scan.range_max)
+                    scan.range_min,
+                    min(r, scan.range_max)
                 )
 
                 sector_ranges.append(r)
@@ -198,7 +281,7 @@ class ObservationPublisher(Node):
             if sector_ranges:
                 lidar_49.append(min(sector_ranges))
             else:
-                lidar_49.append(self.scan.range_max)
+                lidar_49.append(scan.range_max)
 
         return lidar_49
 
@@ -206,34 +289,49 @@ class ObservationPublisher(Node):
     # Target detection
     # ======================================================
 
-    def get_target_values(self):
+    def get_target_values(self, scan=None, pose=None):
+
+        scan = self.scan if scan is None else scan
+        if pose is None:
+            pose = (
+                self.uav_x,
+                self.uav_y,
+                self.uav_yaw,
+                self.target_x,
+                self.target_y,
+            )
 
         if (
-            self.uav_x is None
-            or self.uav_y is None
-            or self.target_x is None
-            or self.target_y is None
-            or self.scan is None
+            scan is None
+            or any(value is None for value in pose)
         ):
             return 0.0, 0.0, 0.0
 
-        dx = self.target_x - self.uav_x
-        dy = self.target_y - self.uav_y
+        uav_x, uav_y, uav_yaw, target_x, target_y = pose
+        dx = target_x - uav_x
+        dy = target_y - uav_y
 
         target_distance = math.sqrt(
             dx * dx + dy * dy
         )
 
-        target_angle = math.atan2(dy, dx)
+        target_angle = target_bearing_in_sensor_frame(
+            uav_x,
+            uav_y,
+            uav_yaw,
+            target_x,
+            target_y,
+            sensor_yaw=LIDAR_YAW_OFFSET,
+        )
 
         # --------------------------------------------------
         # Check whether target lies inside LiDAR FOV
         # --------------------------------------------------
 
         if not (
-            self.scan.angle_min
+            scan.angle_min
             <= target_angle
-            <= self.scan.angle_max
+            <= scan.angle_max
         ):
             return 0.0, 0.0, 0.0
 
@@ -244,9 +342,9 @@ class ObservationPublisher(Node):
         center_index = round(
             (
                 target_angle
-                - self.scan.angle_min
+                - scan.angle_min
             )
-            / self.scan.angle_increment
+            / scan.angle_increment
         )
 
         search_radius = 5
@@ -257,7 +355,7 @@ class ObservationPublisher(Node):
         )
 
         end = min(
-            len(self.scan.ranges),
+            len(scan.ranges),
             center_index + search_radius + 1
         )
 
@@ -266,14 +364,14 @@ class ObservationPublisher(Node):
 
         for i in range(start, end):
 
-            r = self.scan.ranges[i]
+            r = scan.ranges[i]
 
             if not math.isfinite(r):
                 continue
 
             if (
-                r < self.scan.range_min
-                or r > self.scan.range_max
+                r < scan.range_min
+                or r > scan.range_max
             ):
                 continue
 
@@ -286,8 +384,8 @@ class ObservationPublisher(Node):
             return 0.0, 0.0, 0.0
 
         measured_angle = (
-            self.scan.angle_min
-            + best_index * self.scan.angle_increment
+            scan.angle_min
+            + best_index * scan.angle_increment
         )
 
         # Our target sphere radius = 0.5 m.
@@ -327,14 +425,37 @@ class ObservationPublisher(Node):
     # ======================================================
 
     def publish_observation(self):
+        now = time.monotonic()
+        with self._input_lock:
+            inputs_fresh = required_inputs_fresh(
+                now,
+                self.scan_received_at,
+                self.pose_received_at,
+                self.position_received_at,
+                self.scan_valid,
+                self.pose_valid,
+                self.position_valid,
+                max_age=INPUT_MAX_AGE,
+            )
+            scan = self.scan
+            pose = (
+                self.uav_x,
+                self.uav_y,
+                self.uav_yaw,
+                self.target_x,
+                self.target_y,
+            )
 
-        lidar_49 = self.get_49_lidar()
+        if not inputs_fresh:
+            return
+
+        lidar_49 = self.get_49_lidar(scan)
 
         if lidar_49 is None:
             return
 
         target_detected, target_distance, target_angle = (
-            self.get_target_values()
+            self.get_target_values(scan, pose)
         )
 
         observation = (
@@ -352,7 +473,9 @@ class ObservationPublisher(Node):
         # Safety check
         # --------------------------------------------------
 
-        if len(observation) != 54:
+        if len(observation) != 54 or not all(
+            math.isfinite(float(value)) for value in observation
+        ):
 
             self.get_logger().error(
                 f"Wrong observation size: {len(observation)}"
@@ -362,7 +485,7 @@ class ObservationPublisher(Node):
 
         msg = Float32MultiArray()
 
-        msg.data = observation
+        msg.data = [float(value) for value in observation]
 
         self.publisher.publish(msg)
 

@@ -138,7 +138,9 @@ class PX4ControllerNode(Node):
         self.y = 0.0
         self.z = 0.0
         self.heading = 0.0
+        self.position_valid = False
         self.position_received_at = None
+        self.observation_received_at = None
         self.px4_sim_time_us = None
         self.px4_sim_time_received_at = None
 
@@ -163,6 +165,8 @@ class PX4ControllerNode(Node):
         self.takeoff_setpoint_count = 0
         self.takeoff_stream_started_at = None
         self.takeoff_stream_last_at = None
+        self.takeoff_target_x = 0.0
+        self.takeoff_target_y = 0.0
 
         # Current normalized RL action
         self.action = np.zeros(
@@ -190,12 +194,13 @@ class PX4ControllerNode(Node):
             dtype=np.float32,
         )
 
-        if len(data) != 54:
+        if len(data) != 54 or not np.all(np.isfinite(data)):
             return
 
         with self.condition:
 
             self.latest_observation = data.copy()
+            self.observation_received_at = time.monotonic()
 
             self.observation_counter += 1
 
@@ -207,6 +212,11 @@ class PX4ControllerNode(Node):
             self.y = float(msg.y)
             self.z = float(msg.z)
             self.heading = float(msg.heading)
+            self.position_valid = bool(
+                msg.xy_valid
+                and msg.z_valid
+                and np.all(np.isfinite([self.x, self.y, self.z, self.heading]))
+            )
             self.position_received_at = time.monotonic()
             self.condition.notify_all()
 
@@ -357,9 +367,18 @@ class PX4ControllerNode(Node):
 
         self.offboard_pub.publish(msg)
 
+    def has_px4_setpoint_subscribers(self):
+        """Return whether PX4 has discovered both required input topics."""
+        return (
+            self.offboard_pub.get_subscription_count() > 0
+            and self.setpoint_pub.get_subscription_count() > 0
+        )
+
     def publish_position_setpoint(
         self,
         z_target=-1.0,
+        x_target=0.0,
+        y_target=0.0,
     ):
 
         msg = TrajectorySetpoint()
@@ -367,8 +386,8 @@ class PX4ControllerNode(Node):
         msg.timestamp = self.timestamp()
 
         msg.position = [
-            0.0,
-            0.0,
+            x_target,
+            y_target,
             z_target,
         ]
 
@@ -479,46 +498,31 @@ class PX4ControllerNode(Node):
     # ======================================================
 
     def control_loop(self):
-
-        if self.phase == "TAKEOFF":
-
-            self.publish_offboard_mode(
-                position_mode=True
-            )
-
-            self.publish_position_setpoint(
-                z_target=-1.0
-            )
-
-            with self.condition:
+        # Serialize controller output with safe-state transitions so no
+        # timer callback can read a stale action after the transition returns.
+        with self.condition:
+            if self.phase == "TAKEOFF":
+                self.publish_offboard_mode(position_mode=True)
+                self.publish_position_setpoint(
+                    z_target=-1.0,
+                    x_target=self.takeoff_target_x,
+                    y_target=self.takeoff_target_y,
+                )
                 now = time.monotonic()
                 if self.takeoff_stream_started_at is None:
                     self.takeoff_stream_started_at = now
                 self.takeoff_stream_last_at = now
                 self.takeoff_setpoint_count += 1
                 self.condition.notify_all()
-
-        elif self.phase == "VELOCITY":
-
-            self.publish_offboard_mode(
-                position_mode=False
-            )
-
-            self.publish_velocity_setpoint()
-
-        elif self.phase == "LAND":
-
-            if self.landing_complete:
-                return
-
-            # Stop horizontal motion while landing.
-            self.publish_offboard_mode(
-                position_mode=False
-            )
-
-            self.action[:] = 0.0
-
-            self.publish_velocity_setpoint()
+            elif self.phase == "VELOCITY":
+                self.publish_offboard_mode(position_mode=False)
+                self.publish_velocity_setpoint()
+            elif self.phase == "LAND":
+                if self.landing_complete:
+                    return
+                self.action[:] = 0.0
+                self.publish_offboard_mode(position_mode=False)
+                self.publish_velocity_setpoint()
 
     # ======================================================
     # Commands
@@ -601,7 +605,9 @@ class PX4UAVEnv(gym.Env):
         "render_modes": []
     }
 
-    LAND_WAIT_TIMEOUT = 20.0
+    # The preserved SITL trace took ~24 s from NAV_LAND to fresh disarmed
+    # status; this remains bounded while avoiding a normal close-timeout race.
+    LAND_WAIT_TIMEOUT = 30.0
     TAKEOFF_STREAM_TIMEOUT = 3.0
     TAKEOFF_STREAM_MIN_DURATION = 1.0
     TAKEOFF_ACK_TIMEOUT = 3.0
@@ -613,13 +619,12 @@ class PX4UAVEnv(gym.Env):
     # ~1.1 s VehicleStatus publication interval while waiting for its update.
     TAKEOFF_STATUS_UPDATE_TIMEOUT = 1.5
     TAKEOFF_CLOCK_STALL_TIMEOUT = 5.0
+    OBSERVATION_MAX_AGE = 1.0
 
-    # Current Gazebo target position.
-    #
-    # This is used ONLY for reward/termination.
-    # It is NOT placed in the observation.
-    TARGET_X = 3.0
-    TARGET_Y = -3.0
+    # The target in walls.sdf is Gazebo ENU (x=3 east, y=-3 south).
+    # PX4 local position uses NED, so the same target is x=-3 north, y=3 east.
+    TARGET_X = -3.0
+    TARGET_Y = 3.0
 
     def __init__(self):
 
@@ -696,6 +701,8 @@ class PX4UAVEnv(gym.Env):
             raw,
             dtype=np.float32,
         )
+        if raw.shape != (54,) or not np.all(np.isfinite(raw)):
+            raise ValueError("Observation must contain 54 finite values.")
 
         # First 49:
         # raw LiDAR meters [0, 30]
@@ -776,6 +783,10 @@ class PX4UAVEnv(gym.Env):
                     if (
                         self.node.latest_observation
                         is not None
+                        and self.node.observation_received_at is not None
+                        and time.monotonic()
+                        - self.node.observation_received_at
+                        <= self.OBSERVATION_MAX_AGE
                     ):
 
                         return (
@@ -812,7 +823,8 @@ class PX4UAVEnv(gym.Env):
                 started_at = node.takeoff_stream_started_at
                 last_at = node.takeoff_stream_last_at
                 stream_ready = (
-                    started_at is not None
+                    node.has_px4_setpoint_subscribers()
+                    and started_at is not None
                     and last_at is not None
                     and node.takeoff_setpoint_count >= 3
                     and last_at - started_at
@@ -826,7 +838,8 @@ class PX4UAVEnv(gym.Env):
                 if remaining <= 0:
                     raise TimeoutError(
                         "PX4 Offboard setpoint stream was not observed "
-                        "continuously before the mode request."
+                        "continuously with PX4 topic subscriptions before "
+                        "the mode request."
                     )
                 node.condition.wait(timeout=remaining)
 
@@ -940,10 +953,10 @@ class PX4UAVEnv(gym.Env):
                     <= clock_stall_timeout
                 )
 
-                if not position_fresh:
+                if not position_fresh or not node.position_valid:
                     raise TimeoutError(
                         "PX4 takeoff stopped: local-position telemetry is "
-                        "stale or missing."
+                        "stale, missing, or invalid."
                     )
                 px4_sim_time = node.px4_sim_time_us
                 if px4_sim_time is not None and (
@@ -1048,12 +1061,25 @@ class PX4UAVEnv(gym.Env):
                 )
 
     def _takeoff(self):
-
-        self.node.phase = "TAKEOFF"
         with self.node.condition:
+            now = time.monotonic()
+            position_fresh = (
+                self.node.position_received_at is not None
+                and now - self.node.position_received_at
+                <= self.TAKEOFF_TELEMETRY_MAX_AGE
+            )
+            if not position_fresh or not self.node.position_valid:
+                raise RuntimeError(
+                    "Cannot take off: PX4 local-position telemetry is "
+                    "missing, stale, or invalid."
+                )
+            self.node.takeoff_target_x = self.node.x
+            self.node.takeoff_target_y = self.node.y
+            self.node.phase = "TAKEOFF"
             self.node.takeoff_setpoint_count = 0
             self.node.takeoff_stream_started_at = None
             self.node.takeoff_stream_last_at = None
+            self.node.condition.notify_all()
 
         # PX4 must receive a sustained Offboard stream before the mode request.
         self._wait_for_takeoff_setpoint_stream()
@@ -1071,7 +1097,9 @@ class PX4UAVEnv(gym.Env):
         self._wait_for_command_ack(arm_command, ack_counter)
         self._wait_for_airborne_state()
 
-        self.node.phase = "VELOCITY"
+        with self.node.condition:
+            self.node.phase = "VELOCITY"
+            self.node.condition.notify_all()
 
     def _wait_until_landed(
         self,
@@ -1159,10 +1187,9 @@ class PX4UAVEnv(gym.Env):
         # the vehicle is disarmed. In particular, reset() can fail before
         # arming; NAV_LAND in that state can leave PX4 in AUTO_LAND and make
         # the next reset wait indefinitely for a landed indication.
-        self._episode_active = False
-        self.node.action[:] = 0.0
-
         with self.node.condition:
+            self._episode_active = False
+            self.node.action[:] = 0.0
             status_fresh = (
                 self.node.status_received_at is not None
                 and time.monotonic() - self.node.status_received_at
@@ -1175,17 +1202,24 @@ class PX4UAVEnv(gym.Env):
             )
 
         if is_disarmed:
-            self.node.phase = "GROUND"
+            with self.node.condition:
+                self.node.phase = "GROUND"
+                self.node.condition.notify_all()
             return
 
         # For armed or unknown/stale state, LAND streams zero horizontal
         # velocity while PX4 performs its normal landing sequence.
-        self.node.phase = "LAND"
+        with self.node.condition:
+            self.node.phase = "LAND"
 
-        # This records that a landing request was attempted, not that
-        # PX4 has completed the landing.
-        if not self._landing_pending:
-            self._landing_pending = True
+            # This records that a landing request was attempted, not that
+            # PX4 has completed the landing.
+            request_land = not self._landing_pending
+            if request_land:
+                self._landing_pending = True
+            self.node.condition.notify_all()
+
+        if request_land:
             self.node.land()
 
     # ======================================================
@@ -1211,7 +1245,8 @@ class PX4UAVEnv(gym.Env):
         self.current_step = 0
 
         self.previous_action[:] = 0.0
-        self.node.action[:] = 0.0
+        with self.node.condition:
+            self.node.action[:] = 0.0
 
         # For the FIRST integration test we assume a
         # clean / landed PX4 simulation.
@@ -1284,7 +1319,8 @@ class PX4UAVEnv(gym.Env):
         )
 
         # Send action to PX4 controller.
-        self.node.action[:] = action
+        with self.node.condition:
+            self.node.action[:] = action
 
         try:
             return self._step_after_action(
@@ -1337,13 +1373,6 @@ class PX4UAVEnv(gym.Env):
             old_distance
             - new_distance
         )
-
-        physical_speed = (
-            float(action[0])
-        )
-
-        if physical_speed > 0:
-            reward += 0.5
 
         if collision:
             reward -= 100.0
