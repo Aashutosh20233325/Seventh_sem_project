@@ -1,0 +1,1571 @@
+import math
+import threading
+import time
+import warnings
+from collections import deque
+
+import gymnasium as gym
+import numpy as np
+import rclpy
+
+from gymnasium import spaces
+from rclpy.node import Node
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+)
+
+from std_msgs.msg import Float32MultiArray
+
+from px4_msgs.msg import (
+    OffboardControlMode,
+    TrajectorySetpoint,
+    VehicleCommand,
+    VehicleLocalPosition,
+    VehicleStatus,
+    VehicleAttitude,
+    VehicleLandDetected,
+    VehicleCommandAck,
+    TimesyncStatus,
+)
+
+
+VEHICLE_COMMAND_ACK_TOPIC = "/fmu/out/vehicle_command_ack_v1"
+
+
+class PX4ControllerNode(Node):
+
+    def __init__(self, env):
+
+        super().__init__("px4_uav_env_controller")
+
+        self.env = env
+
+        # --------------------------------------------------
+        # PX4 publishers
+        # --------------------------------------------------
+
+        self.offboard_pub = self.create_publisher(
+            OffboardControlMode,
+            "/fmu/in/offboard_control_mode",
+            10,
+        )
+
+        self.setpoint_pub = self.create_publisher(
+            TrajectorySetpoint,
+            "/fmu/in/trajectory_setpoint",
+            10,
+        )
+
+        self.command_pub = self.create_publisher(
+            VehicleCommand,
+            "/fmu/in/vehicle_command",
+            10,
+        )
+
+        # --------------------------------------------------
+        # PX4 Best-Effort QoS
+        # --------------------------------------------------
+
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=10,
+        )
+
+        # --------------------------------------------------
+        # Subscriptions
+        # --------------------------------------------------
+
+        self.obs_sub = self.create_subscription(
+            Float32MultiArray,
+            "/uav/observation",
+            self.observation_callback,
+            10,
+        )
+
+        self.position_sub = self.create_subscription(
+            VehicleLocalPosition,
+            "/fmu/out/vehicle_local_position_v1",
+            self.position_callback,
+            qos,
+        )
+
+        self.status_sub = self.create_subscription(
+            VehicleStatus,
+            "/fmu/out/vehicle_status_v4",
+            self.status_callback,
+            qos,
+        )
+
+        self.command_ack_sub = self.create_subscription(
+            VehicleCommandAck,
+            VEHICLE_COMMAND_ACK_TOPIC,
+            self.command_ack_callback,
+            qos,
+        )
+
+        self.timesync_status_sub = self.create_subscription(
+            TimesyncStatus,
+            "/fmu/out/timesync_status",
+            self.timesync_status_callback,
+            qos,
+        )
+
+        self.land_detected_sub = self.create_subscription(
+            VehicleLandDetected,
+            "/fmu/out/vehicle_land_detected",
+            self.land_detected_callback,
+            qos,
+        )
+
+        self.attitude_sub = self.create_subscription(
+            VehicleAttitude,
+            "/fmu/out/vehicle_attitude",
+            self.attitude_callback,
+            qos,
+        )
+
+        # --------------------------------------------------
+        # State
+        # --------------------------------------------------
+
+        self.latest_observation = None
+        self.observation_counter = 0
+
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+        self.heading = 0.0
+        self.position_received_at = None
+        self.px4_sim_time_us = None
+        self.px4_sim_time_received_at = None
+
+        self.arming_state = 1
+        self.nav_state = 4
+        self.failsafe = False
+        self.pre_flight_checks_pass = False
+        self.latest_arming_reason = None
+        self.latest_disarming_reason = None
+        self.status_received_at = None
+        self.command_ack_counter = 0
+        self.command_ack_history = deque(maxlen=32)
+        self.landed = None
+        self.land_detected_received_at = None
+        self.landing_complete = False
+
+        self.roll = 0.0
+        self.pitch = 0.0
+
+        # Takeoff / flight phase
+        self.phase = "GROUND"
+        self.takeoff_setpoint_count = 0
+        self.takeoff_stream_started_at = None
+        self.takeoff_stream_last_at = None
+
+        # Current normalized RL action
+        self.action = np.zeros(
+            2,
+            dtype=np.float32,
+        )
+
+        # Timer runs continuously so OffboardControlMode
+        # and TrajectorySetpoint are continuously streamed.
+        self.timer = self.create_timer(
+            0.05,  # 20 Hz
+            self.control_loop,
+        )
+
+        self.condition = threading.Condition()
+
+    # ======================================================
+    # ROS callbacks
+    # ======================================================
+
+    def observation_callback(self, msg):
+
+        data = np.asarray(
+            msg.data,
+            dtype=np.float32,
+        )
+
+        if len(data) != 54:
+            return
+
+        with self.condition:
+
+            self.latest_observation = data.copy()
+
+            self.observation_counter += 1
+
+            self.condition.notify_all()
+
+    def position_callback(self, msg):
+        with self.condition:
+            self.x = float(msg.x)
+            self.y = float(msg.y)
+            self.z = float(msg.z)
+            self.heading = float(msg.heading)
+            self.position_received_at = time.monotonic()
+            self.condition.notify_all()
+
+    def status_callback(self, msg):
+
+        with self.condition:
+            self.arming_state = int(msg.arming_state)
+            self.nav_state = int(msg.nav_state)
+            self.failsafe = bool(msg.failsafe)
+            self.pre_flight_checks_pass = bool(
+                msg.pre_flight_checks_pass
+            )
+            self.latest_arming_reason = int(msg.latest_arming_reason)
+            self.latest_disarming_reason = int(msg.latest_disarming_reason)
+            self.status_received_at = time.monotonic()
+            self._update_landing_complete()
+            self.condition.notify_all()
+
+    def command_ack_callback(self, msg):
+        with self.condition:
+            self.command_ack_counter += 1
+            ack = {
+                "counter": self.command_ack_counter,
+                "command": int(msg.command),
+                "result": int(msg.result),
+                "result_param1": int(msg.result_param1),
+                "result_param2": int(msg.result_param2),
+                "received_at": time.monotonic(),
+            }
+            self.command_ack_history.append(ack)
+            self.condition.notify_all()
+
+        if ack["result"] not in (
+            VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED,
+            VehicleCommandAck.VEHICLE_CMD_RESULT_IN_PROGRESS,
+        ):
+            self.get_logger().error(
+                "PX4 rejected/failed command "
+                f"{ack['command']} with result {ack['result']} "
+                f"(result_param1={ack['result_param1']}, "
+                f"result_param2={ack['result_param2']})"
+            )
+
+    def timesync_status_callback(self, msg):
+        # PX4 serializes TimesyncStatus.timestamp with the DDS time offset,
+        # while estimated_offset is sent unchanged. Their sum recovers the
+        # PX4 HRT timestamp, which follows Gazebo time in lockstep SITL.
+        px4_sim_time_us = int(msg.timestamp) + int(msg.estimated_offset)
+
+        with self.condition:
+            self.px4_sim_time_us = px4_sim_time_us
+            self.px4_sim_time_received_at = time.monotonic()
+            self.condition.notify_all()
+
+    def land_detected_callback(self, msg):
+
+        with self.condition:
+            self.landed = bool(msg.landed)
+            self.land_detected_received_at = time.monotonic()
+            self._update_landing_complete()
+            self.condition.notify_all()
+
+    def _update_landing_complete(self):
+
+        now = time.monotonic()
+        status_fresh = (
+            self.status_received_at is not None
+            and now - self.status_received_at <= 1.0
+        )
+        landed_fresh = (
+            self.land_detected_received_at is not None
+            and now - self.land_detected_received_at <= 1.0
+        )
+
+        if (
+            status_fresh
+            and landed_fresh
+            and self.landed is True
+            and self.arming_state == VehicleStatus.ARMING_STATE_DISARMED
+        ):
+            self.landing_complete = True
+
+    def attitude_callback(self, msg):
+
+        # PX4 quaternion:
+        # q = [w, x, y, z]
+
+        w = float(msg.q[0])
+        x = float(msg.q[1])
+        y = float(msg.q[2])
+        z = float(msg.q[3])
+
+        # Roll
+        sin_roll = 2.0 * (
+            w * x + y * z
+        )
+
+        cos_roll = 1.0 - 2.0 * (
+            x * x + y * y
+        )
+
+        self.roll = math.atan2(
+            sin_roll,
+            cos_roll,
+        )
+
+        # Pitch
+        sin_pitch = 2.0 * (
+            w * y - z * x
+        )
+
+        sin_pitch = np.clip(
+            sin_pitch,
+            -1.0,
+            1.0,
+        )
+
+        self.pitch = math.asin(
+            sin_pitch
+        )
+
+    # ======================================================
+    # PX4 publishing
+    # ======================================================
+
+    def timestamp(self):
+
+        return int(
+            self.get_clock().now().nanoseconds / 1000
+        )
+
+    def publish_offboard_mode(
+        self,
+        position_mode,
+    ):
+
+        msg = OffboardControlMode()
+
+        msg.timestamp = self.timestamp()
+
+        msg.position = position_mode
+        msg.velocity = not position_mode
+        msg.acceleration = False
+        msg.attitude = False
+        msg.body_rate = False
+        msg.thrust_and_torque = False
+        msg.direct_actuator = False
+
+        self.offboard_pub.publish(msg)
+
+    def publish_position_setpoint(
+        self,
+        z_target=-1.0,
+    ):
+
+        msg = TrajectorySetpoint()
+
+        msg.timestamp = self.timestamp()
+
+        msg.position = [
+            0.0,
+            0.0,
+            z_target,
+        ]
+
+        msg.velocity = [
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        ]
+
+        msg.acceleration = [
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        ]
+
+        msg.jerk = [
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        ]
+
+        msg.yaw = float("nan")
+        msg.yawspeed = float("nan")
+
+        self.setpoint_pub.publish(msg)
+
+    def publish_velocity_setpoint(self):
+
+        speed_action = float(
+            self.action[0]
+        )
+
+        turn_action = float(
+            self.action[1]
+        )
+
+        # ----------------------------------------------
+        # RL action
+        #
+        # speed in [0, 1]
+        # turn  in [-1, 1]
+        # ----------------------------------------------
+
+        MAX_SPEED = 1.0
+        MAX_YAW_RATE = 0.5
+
+        forward_speed = (
+            speed_action * MAX_SPEED
+        )
+
+        yaw_rate = (
+            turn_action * MAX_YAW_RATE
+        )
+
+        # ------------------------------------------------
+        # Convert body-forward velocity into PX4
+        # local NED velocity.
+        #
+        # PX4 heading is expressed in the local frame.
+        # ------------------------------------------------
+
+        vx = (
+            forward_speed
+            * math.cos(self.heading)
+        )
+
+        vy = (
+            forward_speed
+            * math.sin(self.heading)
+        )
+
+        msg = TrajectorySetpoint()
+
+        msg.timestamp = self.timestamp()
+
+        # Position is not controlled in velocity mode.
+        msg.position = [
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        ]
+
+        msg.velocity = [
+            vx,
+            vy,
+            0.0,
+        ]
+
+        msg.acceleration = [
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        ]
+
+        msg.jerk = [
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        ]
+
+        msg.yaw = float("nan")
+        msg.yawspeed = yaw_rate
+
+        self.setpoint_pub.publish(msg)
+
+    # ======================================================
+    # Continuous control loop
+    # ======================================================
+
+    def control_loop(self):
+
+        if self.phase == "TAKEOFF":
+
+            self.publish_offboard_mode(
+                position_mode=True
+            )
+
+            self.publish_position_setpoint(
+                z_target=-1.0
+            )
+
+            with self.condition:
+                now = time.monotonic()
+                if self.takeoff_stream_started_at is None:
+                    self.takeoff_stream_started_at = now
+                self.takeoff_stream_last_at = now
+                self.takeoff_setpoint_count += 1
+                self.condition.notify_all()
+
+        elif self.phase == "VELOCITY":
+
+            self.publish_offboard_mode(
+                position_mode=False
+            )
+
+            self.publish_velocity_setpoint()
+
+        elif self.phase == "LAND":
+
+            if self.landing_complete:
+                return
+
+            # Stop horizontal motion while landing.
+            self.publish_offboard_mode(
+                position_mode=False
+            )
+
+            self.action[:] = 0.0
+
+            self.publish_velocity_setpoint()
+
+    # ======================================================
+    # Commands
+    # ======================================================
+
+    def send_command(
+        self,
+        command,
+        param1=0.0,
+        param2=0.0,
+    ):
+
+        with self.condition:
+            ack_counter = self.command_ack_counter
+
+        msg = VehicleCommand()
+
+        msg.timestamp = self.timestamp()
+
+        msg.param1 = float(param1)
+        msg.param2 = float(param2)
+
+        msg.command = command
+
+        msg.target_system = 1
+        msg.target_component = 1
+
+        msg.source_system = 1
+        msg.source_component = 1
+
+        msg.from_external = True
+
+        self.command_pub.publish(msg)
+        return ack_counter
+
+    def request_offboard(self):
+
+        return self.send_command(
+            VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+            1.0,
+            6.0,
+        )
+
+    def arm(self):
+
+        return self.send_command(
+            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+            1.0,
+        )
+
+    def land(self):
+
+        self.landing_complete = False
+        self.send_command(
+            VehicleCommand.VEHICLE_CMD_NAV_LAND
+        )
+
+
+class PX4UAVEnv(gym.Env):
+
+    """
+    Gymnasium wrapper around the PX4/Gazebo UAV.
+
+    Action:
+        [speed, turn]
+
+    Observation:
+        49 LiDAR distances
+        target_detected
+        target_distance
+        target_angle
+        previous_speed
+        previous_turn
+
+    Total observation size:
+        54
+    """
+
+    metadata = {
+        "render_modes": []
+    }
+
+    LAND_WAIT_TIMEOUT = 20.0
+    TAKEOFF_STREAM_TIMEOUT = 3.0
+    TAKEOFF_STREAM_MIN_DURATION = 1.0
+    TAKEOFF_ACK_TIMEOUT = 3.0
+    TAKEOFF_MODE_TIMEOUT = 5.0
+    TAKEOFF_TIMEOUT = 15.0
+    TAKEOFF_WALL_TIMEOUT = 45.0
+    TAKEOFF_TELEMETRY_MAX_AGE = 1.0
+    # Keep decisions tied to <=1 s-old status, but allow for the observed
+    # ~1.1 s VehicleStatus publication interval while waiting for its update.
+    TAKEOFF_STATUS_UPDATE_TIMEOUT = 1.5
+    TAKEOFF_CLOCK_STALL_TIMEOUT = 5.0
+
+    # Current Gazebo target position.
+    #
+    # This is used ONLY for reward/termination.
+    # It is NOT placed in the observation.
+    TARGET_X = 3.0
+    TARGET_Y = -3.0
+
+    def __init__(self):
+
+        super().__init__()
+
+        # --------------------------------------------------
+        # Same action interface as old environment
+        # --------------------------------------------------
+
+        self.action_space = spaces.Box(
+            low=np.array(
+                [0.0, -1.0],
+                dtype=np.float32,
+            ),
+            high=np.array(
+                [1.0, 1.0],
+                dtype=np.float32,
+            ),
+            dtype=np.float32,
+        )
+
+        # --------------------------------------------------
+        # New 54-D normalized observation
+        # --------------------------------------------------
+
+        self.observation_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(54,),
+            dtype=np.float32,
+        )
+
+        self.max_steps = 1000
+        self.current_step = 0
+        self._episode_active = False
+        self._landing_pending = False
+        self._closed = False
+        self._close_waiting = False
+        self._close_lock = threading.Lock()
+        self._landing_cleanup_thread = None
+
+        self.previous_action = np.zeros(
+            2,
+            dtype=np.float32,
+        )
+
+        # --------------------------------------------------
+        # ROS
+        # --------------------------------------------------
+
+        if not rclpy.ok():
+            rclpy.init()
+
+        self.node = PX4ControllerNode(self)
+
+        self.spin_thread = threading.Thread(
+            target=self._spin,
+            daemon=True,
+        )
+
+        self.spin_thread.start()
+
+    def _spin(self):
+
+        rclpy.spin(self.node)
+
+    # ======================================================
+    # Observation conversion
+    # ======================================================
+
+    def _convert_observation(self, raw):
+
+        raw = np.asarray(
+            raw,
+            dtype=np.float32,
+        )
+
+        # First 49:
+        # raw LiDAR meters [0, 30]
+        lidar = np.clip(
+            raw[:49] / 30.0,
+            0.0,
+            1.0,
+        )
+
+        target_detected = np.array(
+            [np.clip(raw[49], 0.0, 1.0)],
+            dtype=np.float32,
+        )
+
+        target_distance = np.array(
+            [
+                np.clip(
+                    raw[50] / 30.0,
+                    0.0,
+                    1.0,
+                )
+            ],
+            dtype=np.float32,
+        )
+
+        target_angle = np.array(
+            [
+                np.clip(
+                    raw[51] / math.pi,
+                    -1.0,
+                    1.0,
+                )
+            ],
+            dtype=np.float32,
+        )
+
+        previous_action = np.asarray(
+            self.previous_action,
+            dtype=np.float32,
+        )
+
+        observation = np.concatenate(
+            [
+                lidar,
+                target_detected,
+                target_distance,
+                target_angle,
+                previous_action,
+            ]
+        )
+
+        return observation.astype(
+            np.float32
+        )
+
+    # ======================================================
+    # Wait for observation
+    # ======================================================
+
+    def _wait_for_observation(
+        self,
+        timeout=2.0,
+        previous_counter=None,
+    ):
+
+        start = time.monotonic()
+
+        with self.node.condition:
+
+            while True:
+
+                if (
+                    previous_counter is None
+                    or self.node.observation_counter
+                    > previous_counter
+                ):
+
+                    if (
+                        self.node.latest_observation
+                        is not None
+                    ):
+
+                        return (
+                            self.node.latest_observation.copy()
+                        )
+
+                remaining = (
+                    timeout
+                    - (
+                        time.monotonic()
+                        - start
+                    )
+                )
+
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "No /uav/observation message received."
+                    )
+
+                self.node.condition.wait(
+                    timeout=remaining
+                )
+
+    # ======================================================
+    # Takeoff
+    # ======================================================
+
+    def _wait_for_takeoff_setpoint_stream(self):
+        deadline = time.monotonic() + self.TAKEOFF_STREAM_TIMEOUT
+        node = self.node
+
+        with node.condition:
+            while True:
+                started_at = node.takeoff_stream_started_at
+                last_at = node.takeoff_stream_last_at
+                stream_ready = (
+                    started_at is not None
+                    and last_at is not None
+                    and node.takeoff_setpoint_count >= 3
+                    and last_at - started_at
+                    >= self.TAKEOFF_STREAM_MIN_DURATION
+                    and time.monotonic() - last_at <= 0.5
+                )
+                if stream_ready:
+                    return
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "PX4 Offboard setpoint stream was not observed "
+                        "continuously before the mode request."
+                    )
+                node.condition.wait(timeout=remaining)
+
+    def _wait_for_command_ack(self, command, after_counter):
+        deadline = time.monotonic() + self.TAKEOFF_ACK_TIMEOUT
+        accepted = VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED
+        in_progress = VehicleCommandAck.VEHICLE_CMD_RESULT_IN_PROGRESS
+        node = self.node
+
+        with node.condition:
+            while True:
+                for ack in node.command_ack_history:
+                    if (
+                        ack["counter"] > after_counter
+                        and ack["command"] == command
+                    ):
+                        if ack["result"] == accepted:
+                            return
+                        if ack["result"] != in_progress:
+                            raise RuntimeError(
+                                f"PX4 rejected command {command}: "
+                                f"result={ack['result']}, "
+                                f"result_param1={ack['result_param1']}, "
+                                f"result_param2={ack['result_param2']}."
+                            )
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Timed out waiting for VehicleCommandAck for "
+                        f"command {command}."
+                    )
+                node.condition.wait(timeout=remaining)
+
+    def _wait_for_offboard_mode(self):
+        deadline = time.monotonic() + self.TAKEOFF_MODE_TIMEOUT
+        node = self.node
+        max_age = self.TAKEOFF_TELEMETRY_MAX_AGE
+        offboard_state = VehicleStatus.NAVIGATION_STATE_OFFBOARD
+
+        with node.condition:
+            while True:
+                now = time.monotonic()
+                status_fresh = (
+                    node.status_received_at is not None
+                    and now - node.status_received_at <= max_age
+                )
+                if status_fresh and node.nav_state == offboard_state:
+                    return
+
+                remaining = deadline - now
+                if remaining <= 0:
+                    state = "stale/missing" if not status_fresh else str(node.nav_state)
+                    raise TimeoutError(
+                        "PX4 acknowledged the Offboard request but did not "
+                        f"confirm fresh Offboard mode (nav_state={state})."
+                    )
+                node.condition.wait(timeout=remaining)
+
+    def _require_fresh_preflight(self):
+        node = self.node
+        with node.condition:
+            now = time.monotonic()
+            status_fresh = (
+                node.status_received_at is not None
+                and now - node.status_received_at
+                <= self.TAKEOFF_TELEMETRY_MAX_AGE
+            )
+            if not status_fresh:
+                raise RuntimeError(
+                    "Cannot arm: VehicleStatus telemetry is missing or stale."
+                )
+            if not node.pre_flight_checks_pass:
+                raise RuntimeError(
+                    "Cannot arm: PX4 pre-flight checks are failing "
+                    f"(latest_arming_reason={node.latest_arming_reason}, "
+                    f"latest_disarming_reason={node.latest_disarming_reason})."
+                )
+
+    def _wait_for_airborne_state(self):
+        node = self.node
+        max_age = self.TAKEOFF_TELEMETRY_MAX_AGE
+        clock_stall_timeout = self.TAKEOFF_CLOCK_STALL_TIMEOUT
+        armed_state = VehicleStatus.ARMING_STATE_ARMED
+        offboard_state = VehicleStatus.NAVIGATION_STATE_OFFBOARD
+        takeoff_start_px4_time = None
+        last_px4_time = None
+        wall_start_at = time.monotonic()
+        last_clock_progress_at = time.monotonic()
+        timeout_px4_us = int(self.TAKEOFF_TIMEOUT * 1_000_000)
+
+        with node.condition:
+            while True:
+                now = time.monotonic()
+                status_fresh = (
+                    node.status_received_at is not None
+                    and now - node.status_received_at <= max_age
+                )
+                status_age = (
+                    now - wall_start_at
+                    if node.status_received_at is None
+                    else now - node.status_received_at
+                )
+                position_fresh = (
+                    node.position_received_at is not None
+                    and now - node.position_received_at <= max_age
+                )
+                clock_fresh = (
+                    node.px4_sim_time_received_at is not None
+                    and now - node.px4_sim_time_received_at
+                    <= clock_stall_timeout
+                )
+
+                if not position_fresh:
+                    raise TimeoutError(
+                        "PX4 takeoff stopped: local-position telemetry is "
+                        "stale or missing."
+                    )
+                px4_sim_time = node.px4_sim_time_us
+                if px4_sim_time is not None and (
+                    last_px4_time is None or px4_sim_time > last_px4_time
+                ):
+                    last_px4_time = px4_sim_time
+                    last_clock_progress_at = now
+                elif (
+                    px4_sim_time is not None
+                    and last_px4_time is not None
+                    and px4_sim_time < last_px4_time
+                ):
+                    raise RuntimeError(
+                        "PX4 simulation clock moved backwards during takeoff."
+                    )
+
+                if takeoff_start_px4_time is None and px4_sim_time is not None:
+                    takeoff_start_px4_time = px4_sim_time
+
+                if now - last_clock_progress_at >= clock_stall_timeout:
+                    raise TimeoutError(
+                        "PX4 takeoff stopped: simulation clock did not "
+                        "advance before the clock-stall timeout."
+                    )
+
+                if status_fresh and not node.pre_flight_checks_pass:
+                    raise RuntimeError(
+                        "PX4 pre-flight checks failed during takeoff "
+                        f"(latest_arming_reason={node.latest_arming_reason}, "
+                        f"latest_disarming_reason={node.latest_disarming_reason})."
+                    )
+
+                if now - wall_start_at >= self.TAKEOFF_WALL_TIMEOUT:
+                    raise TimeoutError(
+                        "PX4 takeoff wall-clock limit reached while waiting "
+                        f"for the airborne state (wall elapsed="
+                        f"{now - wall_start_at:.3f} s, "
+                        f"PX4 elapsed={0.0 if takeoff_start_px4_time is None or px4_sim_time is None else (px4_sim_time - takeoff_start_px4_time) / 1_000_000:.3f} s, "
+                        f"NED z={node.z:.3f} m)."
+                    )
+
+                if (
+                    clock_fresh
+                    and status_fresh
+                    and px4_sim_time is not None
+                    and node.arming_state == armed_state
+                    and node.nav_state == offboard_state
+                    and node.z <= -0.8
+                ):
+                    return
+
+                px4_sim_elapsed_us = (
+                    0
+                    if takeoff_start_px4_time is None or px4_sim_time is None
+                    else px4_sim_time - takeoff_start_px4_time
+                )
+                if (
+                    takeoff_start_px4_time is not None
+                    and clock_fresh
+                    and px4_sim_elapsed_us >= timeout_px4_us
+                ):
+                    unmet = []
+                    if node.arming_state != armed_state:
+                        unmet.append(f"armed state (arming_state={node.arming_state})")
+                    if node.nav_state != offboard_state:
+                        unmet.append(f"Offboard mode (nav_state={node.nav_state})")
+                    if node.z > -0.8:
+                        unmet.append(f"altitude (NED z={node.z:.3f}, need <= -0.8 m)")
+                    raise TimeoutError(
+                        "PX4 simulation-time takeoff limit reached while "
+                        "waiting for: "
+                        + ", ".join(unmet)
+                        + f" (PX4 elapsed={px4_sim_elapsed_us / 1_000_000:.3f} s)."
+                    )
+
+                if (
+                    not status_fresh
+                    and status_age >= self.TAKEOFF_STATUS_UPDATE_TIMEOUT
+                ):
+                    raise TimeoutError(
+                        "PX4 takeoff stopped: VehicleStatus did not provide "
+                        "a fresh update within "
+                        f"{self.TAKEOFF_STATUS_UPDATE_TIMEOUT:.3f} s."
+                    )
+
+                stall_remaining = clock_stall_timeout - (
+                    now - last_clock_progress_at
+                )
+                if stall_remaining <= 0:
+                    raise TimeoutError(
+                        "PX4 takeoff stopped: simulation clock telemetry "
+                        "was missing, stale, or did not advance before the "
+                        "clock-stall timeout."
+                    )
+                status_wait_remaining = (
+                    self.TAKEOFF_STATUS_UPDATE_TIMEOUT - status_age
+                    if not status_fresh
+                    else 0.1
+                )
+                node.condition.wait(
+                    timeout=min(0.1, stall_remaining, status_wait_remaining)
+                )
+
+    def _takeoff(self):
+
+        self.node.phase = "TAKEOFF"
+        with self.node.condition:
+            self.node.takeoff_setpoint_count = 0
+            self.node.takeoff_stream_started_at = None
+            self.node.takeoff_stream_last_at = None
+
+        # PX4 must receive a sustained Offboard stream before the mode request.
+        self._wait_for_takeoff_setpoint_stream()
+
+        mode_command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+        ack_counter = self.node.request_offboard()
+        self._wait_for_command_ack(mode_command, ack_counter)
+        self._wait_for_offboard_mode()
+
+        # Do not ask PX4 to arm unless its current checks explicitly pass.
+        self._require_fresh_preflight()
+
+        arm_command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+        ack_counter = self.node.arm()
+        self._wait_for_command_ack(arm_command, ack_counter)
+        self._wait_for_airborne_state()
+
+        self.node.phase = "VELOCITY"
+
+    def _wait_until_landed(
+        self,
+        timeout=20.0,
+        max_age=1.0,
+    ):
+
+        deadline = time.monotonic() + timeout
+
+        with self.node.condition:
+            while True:
+                now = time.monotonic()
+
+                landed_fresh = (
+                    self.node.land_detected_received_at is not None
+                    and now - self.node.land_detected_received_at <= max_age
+                )
+                status_fresh = (
+                    self.node.status_received_at is not None
+                    and now - self.node.status_received_at <= max_age
+                )
+
+                if (
+                    landed_fresh
+                    and status_fresh
+                    and self.node.landed is True
+                    and self.node.arming_state
+                    == VehicleStatus.ARMING_STATE_DISARMED
+                ):
+                    self._landing_pending = False
+                    self.node.landing_complete = True
+                    return
+
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "Timed out waiting for fresh PX4 landed and disarmed state."
+                    )
+
+                self.node.condition.wait(timeout=remaining)
+
+    # ======================================================
+    # Reward helpers
+    # ======================================================
+
+    def _distance_to_target(self):
+
+        return math.hypot(
+            self.TARGET_X - self.node.x,
+            self.TARGET_Y - self.node.y,
+        )
+
+    def _collision_detected(
+        self,
+        raw_observation,
+    ):
+
+        # 49 raw LiDAR distances
+        min_lidar = float(
+            np.min(
+                raw_observation[:49]
+            )
+        )
+
+        # Conservative collision threshold
+        lidar_collision = (
+            min_lidar < 0.25
+        )
+
+        # Large attitude excursion
+        attitude_collision = (
+            abs(self.node.roll) > 1.2
+            or abs(self.node.pitch) > 1.2
+        )
+
+        return (
+            lidar_collision
+            or attitude_collision
+            or self.node.failsafe
+        )
+
+    def _enter_safe_state(self):
+
+        # Do not issue a landing command when fresh telemetry already says
+        # the vehicle is disarmed. In particular, reset() can fail before
+        # arming; NAV_LAND in that state can leave PX4 in AUTO_LAND and make
+        # the next reset wait indefinitely for a landed indication.
+        self._episode_active = False
+        self.node.action[:] = 0.0
+
+        with self.node.condition:
+            status_fresh = (
+                self.node.status_received_at is not None
+                and time.monotonic() - self.node.status_received_at
+                <= self.TAKEOFF_TELEMETRY_MAX_AGE
+            )
+            is_disarmed = (
+                status_fresh
+                and self.node.arming_state
+                == VehicleStatus.ARMING_STATE_DISARMED
+            )
+
+        if is_disarmed:
+            self.node.phase = "GROUND"
+            return
+
+        # For armed or unknown/stale state, LAND streams zero horizontal
+        # velocity while PX4 performs its normal landing sequence.
+        self.node.phase = "LAND"
+
+        # This records that a landing request was attempted, not that
+        # PX4 has completed the landing.
+        if not self._landing_pending:
+            self._landing_pending = True
+            self.node.land()
+
+    # ======================================================
+    # Gymnasium reset
+    # ======================================================
+
+    def reset(
+        self,
+        *,
+        seed=None,
+        options=None,
+    ):
+
+        with self._close_lock:
+            if self._closed or self._close_waiting:
+                raise RuntimeError(
+                    "Cannot reset while environment shutdown is in progress."
+                )
+
+        super().reset(seed=seed)
+
+        self._episode_active = False
+        self.current_step = 0
+
+        self.previous_action[:] = 0.0
+        self.node.action[:] = 0.0
+
+        # For the FIRST integration test we assume a
+        # clean / landed PX4 simulation.
+        #
+        # We do not automatically recover a crashed
+        # vehicle here.
+
+        try:
+            self._wait_until_landed(
+                timeout=self.LAND_WAIT_TIMEOUT
+            )
+
+            self._takeoff()
+
+            raw_observation = (
+                self._wait_for_observation()
+            )
+            observation = self._convert_observation(
+                raw_observation
+            )
+
+            info = {
+                "distance_to_target":
+                    self._distance_to_target(),
+                "x": self.node.x,
+                "y": self.node.y,
+                "z": self.node.z,
+                "target_detected":
+                    bool(raw_observation[49]),
+            }
+
+            self._episode_active = True
+
+            return observation, info
+        except BaseException:
+            try:
+                self._enter_safe_state()
+            except BaseException:
+                pass
+            raise
+
+    # ======================================================
+    # Gymnasium step
+    # ======================================================
+
+    def step(self, action):
+
+        if not self._episode_active:
+            raise RuntimeError(
+                "Episode is not active. Call reset() and wait for it to succeed before step()."
+            )
+
+        action = np.asarray(
+            action,
+            dtype=np.float32,
+        )
+
+        action = np.clip(
+            action,
+            self.action_space.low,
+            self.action_space.high,
+        )
+
+        old_distance = (
+            self._distance_to_target()
+        )
+
+        previous_counter = (
+            self.node.observation_counter
+        )
+
+        # Send action to PX4 controller.
+        self.node.action[:] = action
+
+        try:
+            return self._step_after_action(
+                action,
+                old_distance,
+                previous_counter,
+            )
+        except BaseException:
+            try:
+                self._enter_safe_state()
+            except BaseException:
+                pass
+            raise
+
+    def _step_after_action(
+        self,
+        action,
+        old_distance,
+        previous_counter,
+    ):
+
+        # Wait for a fresh observation.
+        raw_observation = (
+            self._wait_for_observation(
+                timeout=2.0,
+                previous_counter=previous_counter,
+            )
+        )
+
+        self.current_step += 1
+
+        new_distance = (
+            self._distance_to_target()
+        )
+
+        collision = (
+            self._collision_detected(
+                raw_observation
+            )
+        )
+
+        reached = (
+            new_distance <= 0.75
+        )
+
+        # Same basic reward structure as old environment.
+        reward = -0.1
+
+        reward += (
+            old_distance
+            - new_distance
+        )
+
+        physical_speed = (
+            float(action[0])
+        )
+
+        if physical_speed > 0:
+            reward += 0.5
+
+        if collision:
+            reward -= 100.0
+
+        if reached:
+            reward += 100.0
+
+        terminated = (
+            collision
+            or reached
+        )
+
+        truncated = (
+            self.current_step
+            >= self.max_steps
+        )
+
+        if terminated or truncated:
+            self._enter_safe_state()
+
+        self.previous_action = (
+            action.copy()
+        )
+
+        observation = (
+            self._convert_observation(
+                raw_observation
+            )
+        )
+
+        info = {
+            "distance_to_target":
+                new_distance,
+            "collision":
+                collision,
+            "reached_target":
+                reached,
+            "min_lidar":
+                float(
+                    np.min(
+                        raw_observation[:49]
+                    )
+                ),
+            "target_detected":
+                bool(
+                    raw_observation[49]
+                ),
+            "x":
+                self.node.x,
+            "y":
+                self.node.y,
+            "z":
+                self.node.z,
+            "roll":
+                self.node.roll,
+            "pitch":
+                self.node.pitch,
+            "step":
+                self.current_step,
+        }
+
+        return (
+            observation,
+            float(reward),
+            terminated,
+            truncated,
+            info,
+        )
+
+    # ======================================================
+    # Render
+    # ======================================================
+
+    def render(self):
+        pass
+
+    # ======================================================
+    # Close
+    # ======================================================
+
+    def _cleanup_ros(self):
+
+        node = getattr(self, "node", None)
+        spin_thread = getattr(self, "spin_thread", None)
+
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception as exc:
+                warnings.warn(
+                    f"Could not destroy the PX4 ROS node during close: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception as exc:
+            warnings.warn(
+                f"Could not shut down rclpy during close: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        if spin_thread is not None and spin_thread.is_alive():
+            if threading.current_thread() is spin_thread:
+                return
+            try:
+                spin_thread.join(timeout=1.0)
+            except Exception as exc:
+                warnings.warn(
+                    f"Could not join the ROS spin thread during close: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+    def _finish_close_after_landing(self):
+
+        # Each wait is bounded, while this non-daemon monitor keeps ROS alive
+        # until fresh landed-and-disarmed telemetry arrives.
+        while True:
+            try:
+                self._wait_until_landed(timeout=5.0)
+                break
+            except TimeoutError:
+                continue
+            except Exception as exc:
+                warnings.warn(
+                    "Landing telemetry is still unavailable during close; "
+                    f"ROS control remains active: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                time.sleep(1.0)
+
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._close_waiting = False
+
+        self._cleanup_ros()
+
+    def _schedule_cleanup_after_landing(self):
+
+        with self._close_lock:
+            thread = self._landing_cleanup_thread
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._finish_close_after_landing,
+                name="px4_landing_cleanup",
+                daemon=False,
+            )
+            self._landing_cleanup_thread = thread
+            thread.start()
+
+    def close(self):
+
+        with self._close_lock:
+            if self._closed or self._close_waiting:
+                return
+            self._close_waiting = True
+
+        node = getattr(self, "node", None)
+        spin_thread = getattr(self, "spin_thread", None)
+
+        if node is None:
+            with self._close_lock:
+                self._closed = True
+                self._close_waiting = False
+            self._cleanup_ros()
+            return
+
+        wait_for_landing = node is not None
+        if node is not None:
+            try:
+                self._enter_safe_state()
+            except Exception as exc:
+                warnings.warn(
+                    f"Could not fully enter the PX4 safe state during close: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+            if threading.current_thread() is spin_thread:
+                warnings.warn(
+                    "close() was called from the ROS spin thread; "
+                    "landing confirmation will continue in a background monitor.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                wait_for_landing = False
+            else:
+                try:
+                    self._wait_until_landed(
+                        timeout=self.LAND_WAIT_TIMEOUT
+                    )
+                except TimeoutError as exc:
+                    warnings.warn(
+                        "Landing was not confirmed before close timed out; "
+                        f"ROS control remains active: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    wait_for_landing = False
+                except Exception as exc:
+                    warnings.warn(
+                        "Landing could not be confirmed during close; "
+                        f"ROS control remains active: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    wait_for_landing = False
+
+        if not wait_for_landing:
+            self._schedule_cleanup_after_landing()
+            return
+
+        with self._close_lock:
+            self._closed = True
+            self._close_waiting = False
+
+        self._cleanup_ros()
