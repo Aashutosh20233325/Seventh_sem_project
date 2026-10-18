@@ -121,3 +121,19 @@ def test_lidar_publisher_has_no_ground_truth_access():
     source = Path(__file__).with_name("observation_publisher.py").read_text()
     for forbidden in ("gz.", "pose/info", "Pose_V", "target_x", "TARGET"):
         assert forbidden not in source
+
+
+def test_standin_lidar_binning_matches_publisher(publisher_module):
+    import random
+    import sar_standin_env
+
+    rng = random.Random(7)
+    ranges = [rng.choice([float("inf"), float("nan"), rng.uniform(0.05, 40.0)]) for _ in range(1080)]
+    scan = scan_with(ranges)
+    publisher = publisher_module.ObservationPublisher.__new__(publisher_module.ObservationPublisher)
+
+    expected = publisher.get_49_lidar(scan)
+    actual = sar_standin_env.bin_sectors(
+        ranges, scan.angle_min, scan.angle_max, scan.angle_increment, scan.range_min, scan.range_max)
+
+    assert actual == pytest.approx(expected)
