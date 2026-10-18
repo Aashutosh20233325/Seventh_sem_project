@@ -336,3 +336,25 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - After the restore, 60 messages reported 0 detections and the gate passed 3/3.
   - The GUI displayed the moved static sphere late (after the server-side restore); the server-side camera and pose were authoritative.
 - **Gate:** the simulation rate is ≥ 0.35 in both windows, but the margin is small (0.373–0.376 on the camera stamps). No arming, takeoff, or flight command was sent.
+
+## Pre-flight stability check before the supervised target-reaching episode: FAILED, no flight — 2026-10-18 21:55–21:58 UTC
+
+- **Start:** `master` at `ce65e44`, clean. `restart_20261018_oakd3_gpu` was running on D3D12/RTX 3050 with the GUI and recorder; the vehicle was disarmed, Hold, landed/at_rest, `preflight=true`, GCS connected.
+- **Check:** six consecutive 25 s windows (`measure.py`; results in `logs/stability_w1..6.json` and `logs/stability_check.txt`). Required in every window:
+  - simulation rate ≥ 0.35 from RGB, depth, and PX4-position stamps;
+  - status gap ≤ 2.0 s, land gap ≤ 4.0 s, perception gap ≤ 1.5 s;
+  - camera, depth, and perception flowing, and LiDAR ≥ 5 Hz;
+  - vehicle disarmed, Hold, landed/at_rest, preflight true, no failsafe, GCS connected.
+
+| Window | Sim rate (RGB / depth / PX4) | Result |
+|---|---|---|
+| 1 | 0.377 / 0.372 / 0.417 | PASS |
+| 2 | 0.379 / 0.378 / 0.380 | PASS |
+| 3 | 0.375 / 0.375 / 0.432 | PASS |
+| 4 | 0.360 / 0.362 / 0.415 | PASS |
+| 5 | **0.3499 / 0.3489** / 0.414 | **FAIL** (camera-stamp rate below 0.35) |
+| 6 | 0.360 / 0.360 / 0.414 | PASS |
+
+- **Other gates:** passed in all windows. Status gap ≤ 1.78 s, land gap ≤ 3.10 s, perception gap ≤ 0.60 s; RGB 6.8–7.6 Hz, depth 6.5–7.8 Hz, perception 7.2–8.1 Hz, LiDAR 10 Hz; gz server CPU 111–117%, GPU 35–51%.
+- **Outcome:** the approved episode was **not** run. No arming, takeoff, or flight command was sent, and the threshold was not changed.
+- **Note:** the measurement subscribes to the 1080p RGB stream itself, which adds load. The rates show a downward drift over the check (0.377 → 0.35–0.36).
