@@ -5,6 +5,10 @@ procedure, and it does not validate a UGV or multi-agent behavior. Check the
 process table before opening any terminal: do not start a second agent, bridge,
 publisher, PX4, or Gazebo instance for this workflow.
 
+For the isolated PX4 instance 1 workflow, use
+[`../sar_demo_20261018/RUNBOOK_ISOLATED.md`](../sar_demo_20261018/RUNBOOK_ISOLATED.md).
+The shared instance 0 below is not approved for flight testing.
+
 ## Terminals
 
 1. PX4 SITL and Gazebo:
@@ -72,13 +76,13 @@ declaring cleanup complete. Never use forced disarm as automatic recovery.
 
 ## Current validation limitation
 
-At the time this runbook was written, the existing stack was the only running
-SITL instance. It was disarmed and landed, but PX4 reported
+The original shared stack remains running alongside the isolated instance. It
+was disarmed and landed, but PX4 reported
 `pre_flight_checks_pass=false`; no flight was attempted. A second isolated SITL
-configuration has not been validated. Do not run PX4's multi-instance helper
-against the current stack: the local script uses `pkill -x px4`. Do not launch a
-second make target against the same build rootfs; an isolated rootfs and launch
-path must first be established.
+configuration is now available; current state and readiness limits are in the
+new isolated runbook. Do not run PX4's multi-instance helper against the shared
+stack: the local script uses `pkill -x px4`. Do not start a second make target
+against the same build rootfs.
 
 Isolation planning note: Gazebo's local helper supports a separate
 `GZ_PARTITION`, and another XRCE agent can listen on a distinct UDP port.

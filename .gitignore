@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 .pytest_cache/
+/runs/sar_demo_20261018/uav_ros_baseline.bundle
+/runs/sar_demo_20261018/px4_rootfs_baseline.tar
+/runs/sar_demo_20261018/isolated_sitl*/

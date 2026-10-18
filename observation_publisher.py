@@ -1,4 +1,5 @@
 import math
+import os
 import threading
 import time
 import rclpy
@@ -20,13 +21,16 @@ from observation_geometry import (
 )
 
 
-LIDAR_TOPIC = "/world/walls/model/x500_lidar_2d_0/link/link/sensor/lidar_2d_v2/scan"
+UAV_MODEL_NAME = os.environ.get("SAR_UAV_MODEL_NAME", "x500_lidar_2d_0")
+LIDAR_TOPIC = os.environ.get(
+    "SAR_LIDAR_TOPIC",
+    f"/world/walls/model/{UAV_MODEL_NAME}/link/link/sensor/lidar_2d_v2/scan",
+)
 POSE_TOPIC = "/world/walls/pose/info"
 
 OUTPUT_TOPIC = "/uav/observation"
 
 NUM_SECTORS = 49
-UAV_MODEL_NAME = "x500_lidar_2d_0"
 TARGET_MODEL_NAME = "target"
 # The model SDF gives the fixed lidar joint and sensor a zero yaw offset.
 LIDAR_YAW_OFFSET = 0.0

@@ -64,6 +64,7 @@ def load_environment(monkeypatch):
     px4_msgs.VehicleStatus.NAVIGATION_STATE_AUTO_LAND = 18
     px4_msgs.VehicleCommand.VEHICLE_CMD_DO_SET_MODE = 176
     px4_msgs.VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM = 400
+    px4_msgs.VehicleCommand.VEHICLE_CMD_NAV_LAND = 21
     px4_msgs.VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED = 0
     px4_msgs.VehicleCommandAck.VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED = 1
     px4_msgs.VehicleCommandAck.VEHICLE_CMD_RESULT_DENIED = 2
@@ -100,6 +101,7 @@ class FakeNode:
         self.y = 0.0
         self.z = -1.0
         self.heading = 0.0
+        self.heading_valid = True
         self.position_valid = True
         self.roll = 0.0
         self.pitch = 0.0
@@ -111,6 +113,7 @@ class FakeNode:
         self.status_received_at = None
         self.arming_state = 1
         self.nav_state = 4
+        self.system_id = 1
         self.pre_flight_checks_pass = True
         self.latest_arming_reason = 0
         self.latest_disarming_reason = 0
@@ -200,6 +203,7 @@ def make_environment(module):
     env.node = FakeNode()
     env._episode_active = True
     env._landing_pending = False
+    env._landing_request_in_progress = False
     env._closed = False
     env._close_waiting = False
     env._close_lock = threading.Lock()
@@ -395,6 +399,7 @@ def test_wait_rejects_stale_telemetry(monkeypatch):
 def test_reset_missing_telemetry_fails_without_takeoff(monkeypatch):
     module = load_environment(monkeypatch)
     env = make_wait_environment(module)
+    env.TAKEOFF_STATUS_UPDATE_TIMEOUT = 0.02
     env._takeoff = lambda: pytest.fail("takeoff must not start")
 
     with pytest.raises(TimeoutError, match="landed and disarmed"):
@@ -797,6 +802,27 @@ def test_command_ack_subscription_matches_px4_dds_topic(monkeypatch):
     )
 
 
+def test_status_callback_stores_px4_system_id(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.condition = threading.Condition()
+    node._update_landing_complete = lambda: None
+    node.system_id = None
+    message = SimpleNamespace(
+        arming_state=1,
+        nav_state=4,
+        system_id=2,
+        failsafe=False,
+        pre_flight_checks_pass=True,
+        latest_arming_reason=0,
+        latest_disarming_reason=0,
+    )
+
+    module.PX4ControllerNode.status_callback(node, message)
+
+    assert node.system_id == 2
+
+
 @pytest.mark.parametrize(
     ("method_name", "expected_command", "expected_param1", "expected_param2"),
     [
@@ -819,6 +845,8 @@ def test_flight_command_helpers_return_ack_counter_and_publish_expected_command(
     node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
     node.condition = threading.Condition()
     node.command_ack_counter = 7
+    node.system_id = 2
+    node.status_received_at = time.monotonic()
     node.command_pub = Publisher()
     node.timestamp = lambda: 123
 
@@ -830,6 +858,72 @@ def test_flight_command_helpers_return_ack_counter_and_publish_expected_command(
     assert message.command == expected_command
     assert message.param1 == expected_param1
     assert message.param2 == expected_param2
+    assert message.target_system == 2
+
+
+def test_send_command_refuses_to_guess_px4_system_id(monkeypatch):
+    module = load_environment(monkeypatch)
+
+    class Publisher:
+        def publish(self, message):
+            raise AssertionError("command must not be published without a system ID")
+
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.condition = threading.Condition()
+    node.command_ack_counter = 0
+    node.system_id = None
+    node.status_received_at = time.monotonic()
+    node.command_pub = Publisher()
+
+    with pytest.raises(RuntimeError, match="VehicleStatus provides the system ID"):
+        node.send_command(176)
+
+
+def test_send_command_refuses_stale_system_id_telemetry(monkeypatch):
+    module = load_environment(monkeypatch)
+
+    class Publisher:
+        def publish(self, message):
+            raise AssertionError("command must not be published with stale status")
+
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.condition = threading.Condition()
+    node.command_ack_counter = 0
+    node.system_id = 2
+    node.status_received_at = time.monotonic() - 1.001
+    node.command_pub = Publisher()
+
+    with pytest.raises(RuntimeError, match="missing or stale VehicleStatus"):
+        node.send_command(176)
+
+
+def test_land_command_allows_stale_status_with_observed_system_id(monkeypatch):
+    module = load_environment(monkeypatch)
+
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.condition = threading.Condition()
+    node.landing_complete = False
+    node.command_ack_counter = 0
+    node.command_ack_history = []
+    node.system_id = 2
+    node.status_received_at = time.monotonic() - 5.0
+    node.command_pub = Publisher()
+    node.timestamp = lambda: 123
+
+    node.land()
+
+    assert len(node.command_pub.messages) == 1
+    assert node.command_pub.messages[0].command == (
+        module.VehicleCommand.VEHICLE_CMD_NAV_LAND
+    )
+    assert node.command_pub.messages[0].target_system == 2
 
 
 @pytest.mark.parametrize("command_stage", ["mode", "arm"])
@@ -918,7 +1012,7 @@ def test_reset_preflight_failure_does_not_land_while_disarmed(monkeypatch):
         env.reset()
 
     assert not env._episode_active
-    assert env.node.phase == "GROUND"
+    assert env.node.phase == "LAND"
     np.testing.assert_array_equal(env.node.action, [0.0, 0.0])
     assert env.node.land_calls == 0
 
@@ -972,16 +1066,78 @@ def test_reset_altitude_timeout_then_close_keeps_ros_active(monkeypatch):
     assert env._close_waiting is True
 
 
-def test_safe_state_does_not_request_land_when_freshly_disarmed(monkeypatch):
+def test_safe_state_does_not_claim_ground_from_disarmed_status_alone(monkeypatch):
     module = load_environment(monkeypatch)
     env = make_environment(module)
 
     env._enter_safe_state()
 
     assert not env._episode_active
-    assert env.node.phase == "GROUND"
+    assert env.node.phase == "LAND"
     np.testing.assert_array_equal(env.node.action, [0.0, 0.0])
     assert env.node.land_calls == 0
+
+
+def test_safe_state_enters_ground_only_with_fresh_landed_disarmed_telemetry(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.node.landed = True
+    env.node.land_detected_received_at = time.monotonic()
+
+    env._enter_safe_state()
+
+    assert env.node.phase == "GROUND"
+    assert env.node.land_calls == 0
+
+
+def test_failed_land_publication_can_be_retried(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.node.arming_state = 2
+    calls = []
+
+    def fail_once():
+        calls.append("called")
+        if len(calls) == 1:
+            raise RuntimeError("publisher unavailable")
+
+    env.node.land = fail_once
+    with pytest.raises(RuntimeError, match="publisher unavailable"):
+        env._enter_safe_state()
+    assert env._landing_pending is False
+    assert env._landing_request_in_progress is False
+
+    env._enter_safe_state()
+    assert calls == ["called", "called"]
+    assert env._landing_pending is True
+
+
+def test_safe_state_sends_best_effort_land_during_stale_status(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.node.arming_state = 2
+    env.node.status_received_at = time.monotonic() - 1.1
+
+    env._enter_safe_state()
+
+    assert env.node.phase == "LAND"
+    assert env.node.land_calls == 1
+    assert env._landing_pending is True
+    assert env._landing_request_in_progress is False
+
+
+def test_landing_complete_clears_when_vehicle_is_no_longer_landed(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.node.landing_complete = True
+    env.node.landed = True
+    env.node.land_detected_received_at = time.monotonic()
+    env.node.status_received_at = time.monotonic()
+    env.node.arming_state = 2
+
+    module.PX4ControllerNode._update_landing_complete(env.node)
+
+    assert env.node.landing_complete is False
 
 
 def test_takeoff_stale_status_fails_before_arm(monkeypatch):
@@ -990,7 +1146,7 @@ def test_takeoff_stale_status_fails_before_arm(monkeypatch):
     env.node.mode_transition = False
     env.node.status_received_at = time.monotonic() - 5.0
 
-    with pytest.raises(TimeoutError, match="fresh Offboard mode.*stale/missing"):
+    with pytest.raises(TimeoutError, match="VehicleStatus did not provide a fresh update"):
         env._takeoff()
 
     assert env.node.arm_calls == 0
@@ -1021,6 +1177,115 @@ def test_airborne_wait_allows_observed_status_interval_for_fresh_update(monkeypa
     reporter.join()
 
     assert env.node.status_received_at > time.monotonic() - 1.0
+
+
+def test_airborne_wait_survives_observed_1_14_second_status_interval(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_takeoff_environment(module)
+    env.TAKEOFF_TIMEOUT = 15.0
+    env.TAKEOFF_WALL_TIMEOUT = 45.0
+    env.TAKEOFF_CLOCK_STALL_TIMEOUT = 5.0
+    env.TAKEOFF_STATUS_UPDATE_TIMEOUT = 1.5
+    env.node.arming_state = 2
+    env.node.nav_state = 14
+    env.node.z = 0.0
+    env.node.status_received_at = time.monotonic() - 0.02
+    env.node.position_received_at = time.monotonic()
+    env.node.px4_sim_time_us = 1_000_000
+    env.node.px4_sim_time_received_at = time.monotonic()
+
+    def publish_status_at_observed_cadence():
+        deadline = time.monotonic() + 1.12
+        while time.monotonic() < deadline:
+            time.sleep(0.02)
+            with env.node.condition:
+                now = time.monotonic()
+                env.node.position_received_at = now
+                env.node.px4_sim_time_us += 8_800  # about 0.44x wall rate
+                env.node.px4_sim_time_received_at = now
+                env.node.condition.notify_all()
+        with env.node.condition:
+            now = time.monotonic()
+            env.node.status_received_at = now
+            env.node.position_received_at = now
+            env.node.px4_sim_time_us += 8_800
+            env.node.px4_sim_time_received_at = now
+            env.node.z = -0.8
+            env.node.condition.notify_all()
+
+    reporter = threading.Thread(target=publish_status_at_observed_cadence)
+    reporter.start()
+    env._wait_for_airborne_state()
+    reporter.join()
+
+    assert env.node.z <= -0.8
+    assert env.node.status_received_at > time.monotonic() - 1.0
+
+
+def test_airborne_wait_survives_observed_1_71_second_status_interval(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_takeoff_environment(module)
+    env.TAKEOFF_TIMEOUT = 15.0
+    env.TAKEOFF_WALL_TIMEOUT = 45.0
+    env.TAKEOFF_CLOCK_STALL_TIMEOUT = 5.0
+    env.TAKEOFF_STATUS_UPDATE_TIMEOUT = 2.0
+    env.node.arming_state = 2
+    env.node.nav_state = 14
+    env.node.z = 0.0
+    env.node.status_received_at = time.monotonic() - 0.02
+    env.node.position_received_at = time.monotonic()
+    env.node.px4_sim_time_us = 1_000_000
+    env.node.px4_sim_time_received_at = time.monotonic()
+
+    def publish_status_at_observed_cadence():
+        deadline = time.monotonic() + 1.72
+        while time.monotonic() < deadline:
+            time.sleep(0.02)
+            with env.node.condition:
+                now = time.monotonic()
+                env.node.position_received_at = now
+                env.node.px4_sim_time_us += 6_000  # about 0.30x wall rate
+                env.node.px4_sim_time_received_at = now
+                env.node.condition.notify_all()
+        with env.node.condition:
+            now = time.monotonic()
+            env.node.status_received_at = now
+            env.node.position_received_at = now
+            env.node.px4_sim_time_us += 6_000
+            env.node.px4_sim_time_received_at = now
+            env.node.z = -0.8
+            env.node.condition.notify_all()
+
+    reporter = threading.Thread(target=publish_status_at_observed_cadence)
+    reporter.start()
+    env._wait_for_airborne_state()
+    reporter.join()
+
+    assert env.node.z <= -0.8
+    assert env.node.status_received_at > time.monotonic() - 1.0
+
+
+def test_velocity_forward_action_is_suppressed_without_valid_heading(monkeypatch):
+    module = load_environment(monkeypatch)
+    published = []
+
+    class Publisher:
+        def publish(self, msg):
+            published.append(msg)
+
+    node = SimpleNamespace(
+        action=np.array([0.8, 0.4]),
+        heading=0.7,
+        heading_valid=False,
+        timestamp=lambda: 123,
+        setpoint_pub=Publisher(),
+    )
+
+    module.PX4ControllerNode.publish_velocity_setpoint(node)
+
+    assert len(published) == 1
+    assert published[0].velocity == [0.0, 0.0, 0.0]
+    assert published[0].yawspeed == pytest.approx(0.2)
 
 
 def test_airborne_wait_stops_if_status_update_exceeds_bounded_interval(monkeypatch):

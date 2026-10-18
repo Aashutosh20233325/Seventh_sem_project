@@ -138,6 +138,7 @@ class PX4ControllerNode(Node):
         self.y = 0.0
         self.z = 0.0
         self.heading = 0.0
+        self.heading_valid = False
         self.position_valid = False
         self.position_received_at = None
         self.observation_received_at = None
@@ -146,6 +147,7 @@ class PX4ControllerNode(Node):
 
         self.arming_state = 1
         self.nav_state = 4
+        self.system_id = None
         self.failsafe = False
         self.pre_flight_checks_pass = False
         self.latest_arming_reason = None
@@ -212,6 +214,9 @@ class PX4ControllerNode(Node):
             self.y = float(msg.y)
             self.z = float(msg.z)
             self.heading = float(msg.heading)
+            self.heading_valid = bool(
+                msg.heading_good_for_control and np.isfinite(self.heading)
+            )
             self.position_valid = bool(
                 msg.xy_valid
                 and msg.z_valid
@@ -225,6 +230,7 @@ class PX4ControllerNode(Node):
         with self.condition:
             self.arming_state = int(msg.arming_state)
             self.nav_state = int(msg.nav_state)
+            self.system_id = int(msg.system_id)
             self.failsafe = bool(msg.failsafe)
             self.pre_flight_checks_pass = bool(
                 msg.pre_flight_checks_pass
@@ -298,6 +304,8 @@ class PX4ControllerNode(Node):
             and self.arming_state == VehicleStatus.ARMING_STATE_DISARMED
         ):
             self.landing_complete = True
+        else:
+            self.landing_complete = False
 
     def attitude_callback(self, msg):
 
@@ -437,6 +445,10 @@ class PX4ControllerNode(Node):
         forward_speed = (
             speed_action * MAX_SPEED
         )
+        if not getattr(self, "heading_valid", False):
+            # The policy's forward action is body-relative. Without a valid
+            # PX4 heading it cannot be transformed safely into local NED.
+            forward_speed = 0.0
 
         yaw_rate = (
             turn_action * MAX_YAW_RATE
@@ -533,10 +545,27 @@ class PX4ControllerNode(Node):
         command,
         param1=0.0,
         param2=0.0,
+        *,
+        require_fresh_status=True,
     ):
 
         with self.condition:
+            target_system = self.system_id
             ack_counter = self.command_ack_counter
+            status_received_at = self.status_received_at
+
+        if target_system is None:
+            raise RuntimeError(
+                "Cannot send PX4 command before VehicleStatus provides the system ID."
+            )
+        if require_fresh_status and (
+            status_received_at is None
+            or time.monotonic() - status_received_at > 1.0
+        ):
+            raise RuntimeError(
+                "Cannot send PX4 command using missing or stale VehicleStatus "
+                "telemetry (maximum age 1.000 s)."
+            )
 
         msg = VehicleCommand()
 
@@ -547,7 +576,7 @@ class PX4ControllerNode(Node):
 
         msg.command = command
 
-        msg.target_system = 1
+        msg.target_system = target_system
         msg.target_component = 1
 
         msg.source_system = 1
@@ -574,10 +603,15 @@ class PX4ControllerNode(Node):
         )
 
     def land(self):
-
-        self.landing_complete = False
-        self.send_command(
-            VehicleCommand.VEHICLE_CMD_NAV_LAND
+        with self.condition:
+            self.landing_complete = False
+            self.condition.notify_all()
+        # Landing is the safety command used precisely when normal flight
+        # telemetry may be stale. The target still must be a previously
+        # observed PX4 system ID; freshness is enforced for mode/arm commands.
+        return self.send_command(
+            VehicleCommand.VEHICLE_CMD_NAV_LAND,
+            require_fresh_status=False,
         )
 
 
@@ -615,9 +649,10 @@ class PX4UAVEnv(gym.Env):
     TAKEOFF_TIMEOUT = 15.0
     TAKEOFF_WALL_TIMEOUT = 45.0
     TAKEOFF_TELEMETRY_MAX_AGE = 1.0
-    # Keep decisions tied to <=1 s-old status, but allow for the observed
-    # ~1.1 s VehicleStatus publication interval while waiting for its update.
-    TAKEOFF_STATUS_UPDATE_TIMEOUT = 1.5
+    # Keep decisions tied to <=1 s-old status, but allow one replacement
+    # VehicleStatus sample at the measured 1.71 s worst interval in the
+    # isolated, competing SITL runs, with a small bounded margin.
+    TAKEOFF_STATUS_UPDATE_TIMEOUT = 2.0
     TAKEOFF_CLOCK_STALL_TIMEOUT = 5.0
     OBSERVATION_MAX_AGE = 1.0
 
@@ -661,6 +696,7 @@ class PX4UAVEnv(gym.Env):
         self.current_step = 0
         self._episode_active = False
         self._landing_pending = False
+        self._landing_request_in_progress = False
         self._closed = False
         self._close_waiting = False
         self._close_lock = threading.Lock()
@@ -919,6 +955,31 @@ class PX4UAVEnv(gym.Env):
                     f"latest_disarming_reason={node.latest_disarming_reason})."
                 )
 
+    def _wait_for_fresh_command_status(self, timeout=None):
+        """Wait outside callbacks for fresh status before a command is sent."""
+        node = self.node
+        if timeout is None:
+            timeout = self.TAKEOFF_STATUS_UPDATE_TIMEOUT
+        deadline = time.monotonic() + timeout
+        with node.condition:
+            while True:
+                now = time.monotonic()
+                status_fresh = (
+                    node.status_received_at is not None
+                    and now - node.status_received_at
+                    <= self.TAKEOFF_TELEMETRY_MAX_AGE
+                )
+                if status_fresh:
+                    return
+                remaining = deadline - now
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "Cannot send PX4 command: VehicleStatus did not provide "
+                        "a fresh update within "
+                        f"{timeout:.3f} s."
+                    )
+                node.condition.wait(timeout=remaining)
+
     def _wait_for_airborne_state(self):
         node = self.node
         max_age = self.TAKEOFF_TELEMETRY_MAX_AGE
@@ -1083,6 +1144,7 @@ class PX4UAVEnv(gym.Env):
 
         # PX4 must receive a sustained Offboard stream before the mode request.
         self._wait_for_takeoff_setpoint_stream()
+        self._wait_for_fresh_command_status()
 
         mode_command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
         ack_counter = self.node.request_offboard()
@@ -1200,8 +1262,16 @@ class PX4UAVEnv(gym.Env):
                 and self.node.arming_state
                 == VehicleStatus.ARMING_STATE_DISARMED
             )
+            landed_fresh = (
+                self.node.land_detected_received_at is not None
+                and time.monotonic() - self.node.land_detected_received_at
+                <= self.TAKEOFF_TELEMETRY_MAX_AGE
+            )
+            confirmed_ground = (
+                is_disarmed and landed_fresh and self.node.landed is True
+            )
 
-        if is_disarmed:
+        if confirmed_ground:
             with self.node.condition:
                 self.node.phase = "GROUND"
                 self.node.condition.notify_all()
@@ -1212,15 +1282,30 @@ class PX4UAVEnv(gym.Env):
         with self.node.condition:
             self.node.phase = "LAND"
 
-            # This records that a landing request was attempted, not that
-            # PX4 has completed the landing.
-            request_land = not self._landing_pending
+            # Track an in-flight publication separately from a successful
+            # send. A publisher exception must leave a later safe-state call
+            # able to retry the landing request.
+            request_land = (
+                not is_disarmed
+                and not self._landing_pending
+                and not self._landing_request_in_progress
+            )
             if request_land:
-                self._landing_pending = True
+                self._landing_request_in_progress = True
             self.node.condition.notify_all()
 
         if request_land:
-            self.node.land()
+            try:
+                self.node.land()
+            except Exception:
+                with self.node.condition:
+                    self._landing_request_in_progress = False
+                    self.node.condition.notify_all()
+                raise
+            with self.node.condition:
+                self._landing_request_in_progress = False
+                self._landing_pending = True
+                self.node.condition.notify_all()
 
     # ======================================================
     # Gymnasium reset
