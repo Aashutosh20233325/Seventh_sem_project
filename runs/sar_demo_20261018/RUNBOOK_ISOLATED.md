@@ -3,11 +3,11 @@
 This runbook describes the separately owned PX4 instance 1 validation stack.
 It leaves the pre-existing PX4 instance 0, its rootfs, ULog archive, XRCE
 agent, Gazebo partition, bridge, and observation publisher untouched. It does
-not authorize flight by itself. The active instance has completed one
-supervised smoke-test attempt, but PX4 remains armed in AUTO_LAND and has not
-confirmed landed/disarmed telemetry. Keep its control and telemetry processes
-running; do not start another flight or stop the stack until recovery is
-reviewed.
+not authorize flight by itself. Supervised smoke-test attempt 1 (run
+`restart_20261018`) eventually landed and PX4 auto-disarmed after a prolonged
+AUTO_LAND; that run was stopped through the gated shutdown on 2026-10-18 at
+13:16 UTC. The current run is `restart_20261018_visible3` (see "Landing
+setpoint interleaving" below). Always re-verify live state before acting.
 
 ## Isolation layout
 
@@ -26,7 +26,9 @@ reviewed.
 - Each component has a manifest-owned process session and a separate log.
 
 The verified active run is
-`/home/hp/uav_ros/runs/sar_demo_20261018/restart_20261018/`.
+`/home/hp/uav_ros/runs/sar_demo_20261018/restart_20261018_visible3/` (started
+2026-10-18 13:42 UTC with the Gazebo GUI). The previous runs `restart_20261018/` and
+`restart_20261018_smoke2/` are stopped and preserved.
 Check its manifest before doing anything. Do not start another run if its
 components are alive.
 
@@ -224,3 +226,25 @@ written under its isolated rootfs.
 - Latest read-only sample at 2026-10-18 06:04:02 UTC: status system ID 2, armed (`arming_state=2`), `nav_state=18` AUTO_LAND, failsafe false, GCS connected; land flags `landed=false`, `at_rest=false`, `ground_contact=false`. Local position was near the origin (`z=0.032 m`, `vz=0.0055 m/s`) with final heading-good true. Near-ground position is not being treated as proof of landing. PX4 ULog also shows the land flags remained false through latest data at simulation time 887.156 s; the Gazebo model root pose was steady at approximately `(-0.0836, 0.0217, -0.0130)` across three read-only samples. No safe disarmed confirmation exists.
 - Telemetry log: `logs/takeoff_watch_after_close_20261018T055853Z.jsonl` (continuous 20 Hz Offboard/setpoint samples and PX4 state after recorder restart). Smoke output: `logs/supervised_smoke_20261018T055722Z.log`. Initial recorder `logs/takeoff_watch_20261018T055722Z.jsonl` has an early gap because the recorder crashed when serializing NumPy float32 setpoint fields; that error is known and the ULog supplements command ACK and climb evidence. PX4 log: `logs/px4_gazebo.log`. Active ULog: `px4_rootfs/fs/log/2026-10-18/05_27_19.ulg`.
 - Recovery is unresolved. Preserve the active environment cleanup monitor, telemetry recorder, PX4/Gazebo, XRCE, ROS bridge, observation publisher, and QGroundControl. Do not send more commands, force-disarm, stop processes, or retry without a separately approved recovery plan.
+- *Superseded outcome (recorded later):* PX4 ULog shows sustained `ground_contact=true` at PX4 time 917.308 s, `landed`/`at_rest` at 917.980 s, and automatic disarm at 920.000 s (“Landing detected”, “Disarmed by landing”; no forced disarm). After disarm PX4 reverted to its user-intended mode, `nav_state=14` (OFFBOARD), not Hold. The environment's cleanup monitor then confirmed landed/disarmed and exited.
+
+## Landing setpoint interleaving and preflight diagnosis — 2026-10-18
+
+Isolated native baseline (`/home/hp/uav_ros_experiments/landing_baseline_20261018_03/RESULTS.md`): stock `gz_x500`, PX4-native `commander takeoff`/`land`, no Offboard stream. NAV_LAND to auto-disarm took 7.412 PX4 s with one ground-contact rising edge.
+
+**Confirmed by PX4 source:**
+- `/fmu/in/trajectory_setpoint` is bridged onto the same uORB `trajectory_setpoint` topic that FlightModeManager publishes in AUTO modes (`dds_topics.yaml:173`, `FlightModeManager.cpp:364`). `mc_pos_control` uses whichever sample arrived last (`MulticopterPositionControl.cpp:435`).
+- The MC land detector only allows ground contact while the latest trajectory setpoint commands descent (`vz >= 1.1*LNDMC_Z_VEL_MAX`, `MulticopterLandDetector.cpp:244-254`).
+- `pre_flight_checks_pass` is `canArm(current nav_state)` (`Commander.cpp:2064`). With `nav_state=14` and no Offboard signal, `check_modes_offboard_signal_lost` fails (`offboardCheck.cpp:104-114`).
+
+**Confirmed by logs:** In the attempt-1 ULog, between NAV_LAND (741.748 s) and sustained contact (917.308 s), 232 of 878 logged `trajectory_setpoint` samples had exactly `vz=0` (the environment's LAND stream) interleaved with 646 descending samples. During that time `flag_control_offboard_enabled=0`, auto=1, and there were 14 ground-contact rising edges. The native baseline had 0 zero-velocity samples. The previous run's post-flight `pre_flight_checks_pass=false` matched the OFFBOARD-without-signal mode check. After a fresh boot in `nav_state=4`, `restart_20261018_smoke2` reports `pre_flight_checks_pass=true`.
+
+**Confirmed in live SITL with the fix:** Two supervised runs passed. In `restart_20261018_smoke2` (13:30 UTC), NAV_LAND to auto-disarm took 5.932 PX4 s. In `restart_20261018_visible3` (13:45 UTC, watched in the Gazebo GUI), it took 5.940 PX4 s. Both runs had no environment setpoints after AUTO_LAND, a single ground-contact edge, and a `close()` that returned without a timeout (see worklog). After every auto-disarm PX4 reverts to OFFBOARD, so a standalone probe reports `preflight=false` until PX4 is in Hold or the stack is restarted.
+
+**Still unverified:** The ULog subsamples setpoints at about 5 Hz, so the true interleave ratio is not measured. Host load and simulation slowdown were not measured and may also contribute. Two flights are a small sample.
+
+**Code change (`px4_uav_env.py`):** In the LAND phase the environment keeps the Offboard heartbeat and zero-velocity setpoint while fresh status reports OFFBOARD. When a status sample reports `NAVIGATION_STATE_AUTO_LAND` during LAND, it latches `land_setpoints_released` and stops publishing both `OffboardControlMode` and `TrajectorySetpoint`. Stale or later-changed status, including the post-disarm reversion to OFFBOARD, does not restart the stream. Only a new `land()` request or a new takeoff clears the latch. The single NAV_LAND request, the fresh landed-and-disarmed completion gate, the non-daemon cleanup monitor, and close semantics are unchanged. If PX4 left AUTO_LAND for OFFBOARD while still airborne, PX4's own offboard-loss failsafe would act instead of a zero-velocity hover.
+
+**Tests:** 11 new offline tests in `test_px4_uav_env_safety.py`; the full suite has 106 passing. Five of them fail against the pre-change code.
+
+**Analysis scripts and outputs:** `/home/hp/uav_ros_experiments/landing_interleave_analysis_20261018/` (`analyze_landing_setpoints.py`, `primary_05_27_19.txt`, `baseline_06_34_31.txt`, `telemetry_recorder.py`, `estimator_flags_probe.py`).

@@ -110,3 +110,67 @@ Source/configuration inspection established:
 - Recorder caveat: the first read-only recorder stopped when its JSON encoder encountered a NumPy float32 trajectory-setpoint field. Its log ends at the beginning of Offboard streaming. A corrected recorder was started immediately after the close timeout; its events are continuous afterward. PX4 ULog fills ACK/takeoff evidence during the gap.
 - Logs: `runs/sar_demo_20261018/restart_20261018/logs/supervised_smoke_20261018T055722Z.log`, `takeoff_watch_20261018T055722Z.jsonl`, `takeoff_watch_after_close_20261018T055853Z.jsonl`, `px4_gazebo.log`, and `px4_rootfs/fs/log/2026-10-18/05_27_19.ulg`.
 - No further command, parameter change, process stop, or flight attempt was made. Continue preserving the active control/telemetry processes and wait for review of a separate recovery action; do not declare landing success.
+- *Superseded (recorded later):* the ULog shows PX4 auto-disarmed at PX4 time 920.000 s, after sustained ground contact at 917.308 s and landed/at-rest at 917.980 s. PX4 then reverted to `nav_state=14` (OFFBOARD). See the next section.
+
+## Landing interleaving analysis, LAND-phase fix, and restart — 2026-10-18
+
+- Start state at 13:19:53 UTC: `/home/hp/uav_ros` on `master` at `3203183`, clean, no untracked files.
+- Isolated native-X500 baseline (`/home/hp/uav_ros_experiments/landing_baseline_20261018_03/`): NAV_LAND to auto-disarm took 7.412 PX4 s with no Offboard stream. This result was not modified.
+- **Source-confirmed mechanism:** `/fmu/in/trajectory_setpoint` shares uORB `trajectory_setpoint` with PX4's native AUTO_LAND setpoints. The position controller uses the latest sample. The land detector forces `ground_contact=false` unless the latest setpoint commands descent. File and line references are in `RUNBOOK_ISOLATED.md`.
+- **Log-confirmed:** in attempt 1, 232 of 878 logged setpoints between NAV_LAND and sustained contact were exactly `vz=0`, there were 14 ground-contact rising edges, and Offboard control was disabled. The baseline had 0 zero-velocity samples and 1 rising edge. Script and outputs: `/home/hp/uav_ros_experiments/landing_interleave_analysis_20261018/`.
+- **Unverified:** the true interleave rate (the ULog samples at 5 Hz) and any contribution from host load or simulation slowdown.
+- **Preflight `false` after attempt 1, diagnosed:** `pre_flight_checks_pass = canArm(nav_state)`. PX4 was in OFFBOARD after the auto-disarm, and the GROUND-phase controller publishes no Offboard signal, so the Offboard mode check failed. This was not a sensor or estimator fault, and no check was bypassed.
+- **Recorder caveat:** the old recorder's `timestamp` field steps forward 15–30 s about every 30 s wall time (XRCE timesync epoch adjustment) and advances at about 0.43x wall between steps. Do not use it as a simulation-rate clock.
+- **Code change:** `px4_uav_env.py` now latches `land_setpoints_released` when status reports AUTO_LAND during the LAND phase, and stops both Offboard publishers from then on. The latch is cleared only by a new `land()` request or `_takeoff()`. 11 new offline tests; the full suite has **106 passing** with ROS Jazzy and the overlay sourced. `py_compile -W error` and `git diff --check` pass. Five of the new tests fail against the pre-change code.
+- **Shutdown of `restart_20261018`:** this was performed by a concurrent session, not by this session. At 13:16:07 `verify_shutdown_state.py` refused because control publishers were active. At 13:16:17 that session sent SIGINT to the exact ground-controller group 25309. At 13:16:26 the gate passed (status 0.117 s old, disarmed, `nav_state=14`, landed/at_rest/ground_contact true). From 13:16:28 to 13:16:49 that session ran the manifest-gated `isolated_sitl.py stop`. That session then ended, and its passive recorder (last sample 13:16:47) and stray `rg`/`gz topic` shell were terminated. All logs and the ULog are preserved.
+- **Restart:** at 13:27:09 UTC `isolated_sitl.py start --run-dir runs/sar_demo_20261018/restart_20261018_smoke2` started the stack (instance 1, system ID 2, domain 43, UDP 18890, partition `uav_sar_validation_20261018_instance1`, own rootfs; ULog `px4_rootfs/fs/log/2026-10-18/13_27_28.ulg`). QGroundControl PID 24821 was kept running as the GCS.
+- **Readiness probe at 13:27:46:** PASS. `system_id=2`, disarmed, `nav_state=4`, `failsafe=false`, `preflight=true`, GCS connected; landed/at_rest/ground_contact true; LiDAR 1080 beams (805 finite); 54 observation values. Estimator: tilt and yaw aligned, mag heading fused, consistent and observable, no mag or heading faults; `cs_mag_aligned_in_flight=false` as expected on the ground.
+- New passive recorder: `restart_20261018_smoke2/logs/telemetry_full_20261018T1327Z.jsonl`. It records every message field, with wall UTC, monotonic time, and the PX4 timestamp kept separate, and it subscribes to `/fmu/in/*` to observe the environment's stream.
+
+## Supervised smoke-test attempt 2 (LAND-phase fix) — passed — 2026-10-18
+
+- One attempt, no retry. Gate at 13:30:08–13:30:19.9 UTC (`restart_20261018_smoke2/logs/preflight_gate_attempt2.txt`): PASS with `system_id=2`, disarmed, `nav_state=4`, `failsafe=false`, `preflight=true`, GCS connected; landed/at_rest/ground_contact true; LiDAR 1080 beams (805 finite); 54 observation values. No other publishers on the `/fmu/in` control topics. The unmodified `test_px4_uav_env.py` was then started.
+- PX4 ULog `13_27_28.ulg`, sim seconds:
+  - Offboard: command 176 at 91.366, ACK result 0 at 91.380, `nav_state=14` at 91.392.
+  - Arm: command 400 at 91.567, ACK result 0 at 91.584, armed at 91.584.
+  - `heading_good_for_control` true at 100.244; minimum NED z = −1.634 m at 100.404.
+  - NAV_LAND: command 21 at 100.736, ACK result 0 at 100.740, AUTO_LAND (`nav_state=18`) at 100.752.
+  - First `ground_contact` at 103.972 (+3.236 s); `landed`/`at_rest` at 104.660 (+3.924 s).
+  - Automatic disarm at 106.668 (+5.932 s from the request; 2.008 s after landed). PX4 logged “Landing detected” and “Disarmed by landing”.
+- Wall clock (host receipt, UTC): stream start 13:30:25.30; reset returned at 13:30:42.36 (z = −1.626 m); ten `[0.2, 0.0]` actions ran 13:30:42.46–13:30:43.36 with no collision and rewards about −0.1; NAV_LAND published at 13:30:43.362, ACK at 13:30:43.366, AUTO_LAND status received at 13:30:43.630; first ground contact at 13:30:50.126; landed/at_rest at 13:30:51.585; disarmed status received at 13:30:55.773; the smoke process exited with code 0 at 13:30:55.994.
+- The Offboard stream stopped as designed. The recorder saw 0 `in_setpoint` and 0 `in_offboard_mode` messages after the AUTO_LAND status was received; the last of each arrived 0.03 s earlier. ULog landing window: 0 of 30 logged trajectory setpoints had `vz=0`, versus 232 of 878 in attempt 1; there was 1 ground-contact rising edge, versus 14 in attempt 1. Output: `/home/hp/uav_ros_experiments/landing_interleave_analysis_20261018/smoke2_13_27_28.txt`.
+- Exactly one NAV_LAND was sent (environment commands seen: 176, 400, 21). There was no forced disarm and no extra command. `close()` returned without a timeout warning, and no environment process or `/fmu/in` publisher remains.
+- Post-flight state: disarmed, landed/at_rest/ground_contact true. PX4 again reverted to `nav_state=14`, so `pre_flight_checks_pass=false` with the same Offboard-signal mode check. This is expected and does not block a later `reset()`, which streams setpoints before requesting the mode. A standalone readiness probe will report preflight false until PX4 is in Hold or the stack is restarted.
+- Caveat: this is one sample. Landing timing was comparable to the native baseline; host load was not separately measured.
+
+## Visible end-to-end smoke test (attempt 3) — passed — 2026-10-18
+
+- Initial state at 13:40:44 UTC: the full `restart_20261018_smoke2` stack was still running (PX4 39114, Gazebo server 39321 and GUI 39322, XRCE 39106, bridge 39501, publisher 39607, recorder 39835, QGC 24821). PX4 was disarmed and landed, but `nav_state=14` gave `preflight=false` (the diagnosed post-disarm OFFBOARD reversion). A Gazebo GUI screenshot through `/gui/screenshot` showed it was rendering the X500 with LiDAR.
+- Gated restart instead of a mode command:
+  - `verify_shutdown_state.py` PASS at 13:41:47.
+  - `isolated_sitl.py stop --run-dir runs/sar_demo_20261018/restart_20261018_smoke2` PASS at 13:41:59; it exited 0 at 13:42:18 and all 10 manifest PIDs exited.
+  - The recorder (PID 39835) was closed with SIGINT.
+  - `isolated_sitl.py start --run-dir runs/sar_demo_20261018/restart_20261018_visible3` ran 13:42:34–13:42:48.
+  - Processes: XRCE 40813/40814, PX4 40821/40822 with Gazebo server 41028 and GUI 41029 (pgid 40821), bridge 41202/41214, publisher 41312/41329, recorder 41334, QGC 24821 kept.
+- Pre-flight evidence:
+  - `verify_isolated_topics` PASS (13:43:06 and 13:45:10): `system_id=2`, disarmed, `nav_state=4`, `failsafe=false`, `preflight=true`, GCS connected; landed/at_rest/ground_contact true; LiDAR 1080 beams (805 finite); 54 observation values.
+  - Estimator flags healthy. The Gazebo model list contains only `x500_lidar_2d_1` (plus static boxes).
+  - `/fmu/in` control topics had 0 publishers. `px4_uav_env.__file__` resolved to `/home/hp/uav_ros/px4_uav_env.py`, which contains the latch.
+  - GUI screenshot rendered the drone. The user confirmed the window was visible before launch.
+- An initial launch at 13:44:49 aborted inside the gate (a shell-variable bug in the wrapper); no ROS message or command was sent. The corrected gate passed at 13:45:20.970 and the unmodified `test_px4_uav_env.py` ran once.
+- PX4 ULog `restart_20261018_visible3/px4_rootfs/fs/log/2026-10-18/13_42_52.ulg`, sim seconds:
+  - Offboard: command 176 at 80.428, ACK 0 at 80.436, OFFBOARD at 80.448.
+  - Arm: command 400 at 80.604, ACK 0 at 80.628, armed at 80.628.
+  - `heading_good` at 89.308; minimum z = −1.642 m at 89.444.
+  - NAV_LAND: command 21 at 89.776, ACK 0 at 89.784, AUTO_LAND at 89.796.
+  - `ground_contact` at 93.012; landed/at_rest at 93.700.
+  - Motor outputs reached ~0.002 by 94.088. Auto-disarm at **95.716 (+5.940 s from the request)**, logged as “Disarmed by landing”.
+- Wall clock (UTC):
+  - Stream start 13:45:23.28; Offboard ACK 13:45:24.37; arm ACK 13:45:24.77; liftoff about 13:45:28.4.
+  - Reset returned 13:45:42.46 (z = −1.637 m). Ten `[0.2, 0.0]` actions ran 13:45:42.53–43.42 with no collisions.
+  - NAV_LAND 13:45:43.425; AUTO_LAND received 13:45:43.707.
+  - Ground contact 13:45:50.06; landed/at_rest 13:45:51.44; disarmed received 13:45:55.50. Exit code 0 at 13:45:55.724, with no warnings.
+- Stream release: the recorder saw 0 `in_setpoint` and 0 `in_offboard_mode` messages after AUTO_LAND was received (the last arrived 0.027 s before). The only logged `vz=0` setpoint in the window, at 89.780, came before AUTO_LAND at 89.796. There was 1 ground-contact edge. Environment commands seen: 176, 400, 21 only.
+- Propellers: after landing, PX4's motor-speed command to Gazebo was `0,0,0,0`, and rotor_0's pose was unchanged across 3 s at 13:46:26.
+- Visual evidence: 40 GUI frames in `restart_20261018_visible3/logs/gui_frames/` (airborne about 13:45:30–13:45:47, landed at 13:46:00).
+- Analysis output: `/home/hp/uav_ros_experiments/landing_interleave_analysis_20261018/visible3_13_42_52.txt`.

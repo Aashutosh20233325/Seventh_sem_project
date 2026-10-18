@@ -163,6 +163,11 @@ class PX4ControllerNode(Node):
         self.landed = None
         self.land_detected_received_at = None
         self.landing_complete = False
+        # Set once fresh status confirms AUTO_LAND for the current landing
+        # request. PX4 routes /fmu/in/trajectory_setpoint onto the same uORB
+        # topic as its native landing setpoints, so the LAND stream must stop
+        # rather than interleave zero vertical velocity with the descent.
+        self.land_setpoints_released = False
 
         self.roll = 0.0
         self.pitch = 0.0
@@ -243,6 +248,13 @@ class PX4ControllerNode(Node):
             self.latest_arming_reason = int(msg.latest_arming_reason)
             self.latest_disarming_reason = int(msg.latest_disarming_reason)
             self.status_received_at = time.monotonic()
+            if (
+                getattr(self, "phase", None) == "LAND"
+                and self.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LAND
+            ):
+                # Latched: later stale or changed status must not restart
+                # the competing stream for this landing request.
+                self.land_setpoints_released = True
             self._update_landing_complete()
             self.condition.notify_all()
 
@@ -535,7 +547,10 @@ class PX4ControllerNode(Node):
                 self.publish_offboard_mode(position_mode=False)
                 self.publish_velocity_setpoint()
             elif self.phase == "LAND":
-                if self.landing_complete:
+                # While PX4 still reports OFFBOARD, keep the heartbeat and
+                # zero-velocity setpoints; after fresh AUTO_LAND, PX4's native
+                # landing setpoints must be the only trajectory input.
+                if self.landing_complete or self.land_setpoints_released:
                     return
                 self.action[:] = 0.0
                 self.publish_offboard_mode(position_mode=False)
@@ -610,6 +625,8 @@ class PX4ControllerNode(Node):
     def land(self):
         with self.condition:
             self.landing_complete = False
+            # A new landing request needs its own fresh AUTO_LAND confirmation.
+            self.land_setpoints_released = False
             self.condition.notify_all()
         # Landing is the safety command used precisely when normal flight
         # telemetry may be stale. The target still must be a previously
@@ -1146,6 +1163,7 @@ class PX4UAVEnv(gym.Env):
             self.node.takeoff_target_x = self.node.x
             self.node.takeoff_target_y = self.node.y
             self.node.phase = "TAKEOFF"
+            self.node.land_setpoints_released = False
             self.node.takeoff_setpoint_count = 0
             self.node.takeoff_stream_started_at = None
             self.node.takeoff_stream_last_at = None

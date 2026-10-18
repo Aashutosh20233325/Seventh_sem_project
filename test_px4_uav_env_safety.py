@@ -135,11 +135,13 @@ class FakeNode:
         self.arm_transition = True
         self.arm_calls = 0
         self.landing_complete = False
+        self.land_setpoints_released = False
         self.destroy_calls = 0
 
     def land(self):
         self.land_calls += 1
         self.landing_complete = False
+        self.land_setpoints_released = False
 
     def has_px4_setpoint_subscribers(self):
         return self.px4_setpoint_subscribers
@@ -1605,3 +1607,274 @@ def test_takeoff_setpoint_stream_requires_px4_topic_subscriptions(monkeypatch):
 
     with pytest.raises(TimeoutError, match="PX4 topic subscriptions"):
         env._wait_for_takeoff_setpoint_stream()
+
+
+# ----------------------------------------------------------------------
+# LAND phase: release the Offboard stream once PX4 reports AUTO_LAND
+# ----------------------------------------------------------------------
+
+
+class RecordingPublisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
+def make_land_node(module):
+    """Controller node in LAND phase with real callback/publish methods."""
+    node = SimpleNamespace(
+        condition=threading.Condition(),
+        phase="LAND",
+        offboard_pub=RecordingPublisher(),
+        setpoint_pub=RecordingPublisher(),
+        command_pub=RecordingPublisher(),
+        timestamp=lambda: 123,
+        action=np.zeros(2, dtype=np.float32),
+        heading=0.0,
+        heading_valid=True,
+        arming_state=2,
+        nav_state=14,
+        system_id=2,
+        failsafe=False,
+        pre_flight_checks_pass=True,
+        latest_arming_reason=0,
+        latest_disarming_reason=0,
+        status_received_at=time.monotonic(),
+        command_ack_counter=0,
+        landed=False,
+        land_detected_received_at=time.monotonic(),
+        landing_complete=False,
+        land_setpoints_released=False,
+    )
+    cls = module.PX4ControllerNode
+    for name in (
+        "status_callback",
+        "land_detected_callback",
+        "_update_landing_complete",
+        "control_loop",
+        "publish_offboard_mode",
+        "publish_velocity_setpoint",
+        "send_command",
+        "land",
+    ):
+        setattr(node, name, getattr(cls, name).__get__(node))
+    return node
+
+
+def status_message(nav_state, arming_state=2):
+    return SimpleNamespace(
+        arming_state=arming_state,
+        nav_state=nav_state,
+        system_id=2,
+        failsafe=False,
+        pre_flight_checks_pass=True,
+        latest_arming_reason=0,
+        latest_disarming_reason=0,
+    )
+
+
+def test_land_phase_keeps_heartbeat_and_zero_velocity_while_still_offboard(
+    monkeypatch,
+):
+    module = load_environment(monkeypatch)
+    node = make_land_node(module)
+    node.action[:] = [0.6, 0.4]
+
+    node.status_callback(status_message(nav_state=14))
+    node.control_loop()
+    node.control_loop()
+
+    assert node.land_setpoints_released is False
+    assert len(node.offboard_pub.messages) == 2
+    assert len(node.setpoint_pub.messages) == 2
+    assert node.offboard_pub.messages[-1].velocity is True
+    assert node.setpoint_pub.messages[-1].velocity == [0.0, 0.0, 0.0]
+    assert node.setpoint_pub.messages[-1].yawspeed == 0.0
+
+
+def test_land_phase_stops_both_publishers_after_fresh_auto_land(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = make_land_node(module)
+
+    node.control_loop()
+    node.status_callback(status_message(nav_state=18))
+    for _ in range(5):
+        node.control_loop()
+
+    assert node.land_setpoints_released is True
+    assert len(node.offboard_pub.messages) == 1
+    assert len(node.setpoint_pub.messages) == 1
+
+
+def test_stale_or_changed_status_after_auto_land_does_not_restart_stream(
+    monkeypatch,
+):
+    module = load_environment(monkeypatch)
+    node = make_land_node(module)
+    node.status_callback(status_message(nav_state=18))
+
+    # Status goes stale while PX4 is still landing.
+    node.status_received_at = time.monotonic() - 10.0
+    node._update_landing_complete()
+    node.control_loop()
+    # PX4 reverts to its user-intended OFFBOARD mode (as seen after the
+    # previous auto-disarm); the released stream must stay released.
+    node.status_callback(status_message(nav_state=14))
+    node.control_loop()
+
+    assert node.landing_complete is False
+    assert node.land_setpoints_released is True
+    assert node.offboard_pub.messages == []
+    assert node.setpoint_pub.messages == []
+
+
+def test_auto_land_outside_land_phase_does_not_release_stream(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = make_land_node(module)
+    node.phase = "VELOCITY"
+
+    node.status_callback(status_message(nav_state=18))
+
+    assert node.land_setpoints_released is False
+
+
+def test_new_land_request_requires_its_own_auto_land_confirmation(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = make_land_node(module)
+    node.status_callback(status_message(nav_state=18))
+    assert node.land_setpoints_released is True
+
+    node.land()
+    node.control_loop()
+
+    assert node.land_setpoints_released is False
+    assert node.command_pub.messages[-1].command == 21
+    assert len(node.setpoint_pub.messages) == 1
+
+
+def test_takeoff_clears_previous_landing_release(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_takeoff_environment(module)
+    env.node.land_setpoints_released = True
+    env.node.z = -1.0
+
+    env._takeoff()
+
+    assert env.node.land_setpoints_released is False
+    assert env.node.phase == "VELOCITY"
+
+
+def test_released_landing_still_requires_fresh_landed_and_disarmed(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = make_land_node(module)
+    node.status_callback(status_message(nav_state=18))
+
+    # Ground contact or zero velocity alone is never completion.
+    node.land_detected_callback(SimpleNamespace(landed=False))
+    assert node.landing_complete is False
+
+    # Landed but still armed.
+    node.land_detected_callback(SimpleNamespace(landed=True))
+    assert node.landing_complete is False
+
+    # Disarmed, but the landed sample has gone stale.
+    node.land_detected_received_at = time.monotonic() - 2.0
+    node.status_callback(status_message(nav_state=18, arming_state=1))
+    assert node.landing_complete is False
+
+    # Fresh landed plus fresh disarmed.
+    node.land_detected_callback(SimpleNamespace(landed=True))
+    assert node.landing_complete is True
+
+
+@pytest.mark.parametrize("landed", [None, True])
+def test_stale_or_missing_landed_telemetry_keeps_cleanup_monitor_alive(
+    monkeypatch, landed
+):
+    module = load_environment(monkeypatch)
+    env = make_close_environment(module)
+    env.LAND_WAIT_TIMEOUT = 0.01
+    monkeypatch.setattr(module.rclpy, "ok", lambda: False)
+    env.node.arming_state = 1
+    env.node.status_received_at = time.monotonic()
+    env.node.landed = landed
+    env.node.land_detected_received_at = (
+        None if landed is None else time.monotonic() - 5.0
+    )
+
+    with pytest.warns(RuntimeWarning, match="Landing was not confirmed"):
+        env.close()
+
+    time.sleep(0.1)
+    assert env._landing_cleanup_thread.is_alive()
+    assert env.node.destroy_calls == 0
+    assert env._closed is False
+
+    report_landed_and_disarmed(module, env.node)
+    env._landing_cleanup_thread.join(timeout=2.0)
+
+    assert not env._landing_cleanup_thread.is_alive()
+    assert env.node.destroy_calls == 1
+
+
+def test_background_cleanup_outlives_foreground_timeout_and_runs_once(
+    monkeypatch,
+):
+    module = load_environment(monkeypatch)
+    env = make_close_environment(module)
+    env.LAND_WAIT_TIMEOUT = 0.01
+    monkeypatch.setattr(module.rclpy, "ok", lambda: False)
+    env.node.arming_state = 2
+    env.node.nav_state = 18
+
+    with pytest.warns(RuntimeWarning, match="Landing was not confirmed"):
+        env.close()
+
+    monitor = env._landing_cleanup_thread
+    assert monitor.daemon is False
+    time.sleep(0.1)
+    assert monitor.is_alive()
+
+    # Further close/schedule calls while the monitor waits are no-ops.
+    env.close()
+    env._schedule_cleanup_after_landing()
+    assert env._landing_cleanup_thread is monitor
+
+    report_landed_and_disarmed(module, env.node)
+    monitor.join(timeout=2.0)
+    env.close()
+    env._schedule_cleanup_after_landing()
+    if env._landing_cleanup_thread is not monitor:
+        env._landing_cleanup_thread.join(timeout=2.0)
+
+    assert not monitor.is_alive()
+    assert env.node.destroy_calls == 1
+    assert env.spin_thread.join_calls == 1
+    assert env.node.land_calls == 1
+    assert env._closed is True
+
+
+def test_repeated_status_and_safe_state_calls_send_one_land_command(
+    monkeypatch,
+):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    node = make_land_node(module)
+    node.phase = "VELOCITY"
+    env.node = node
+
+    env._enter_safe_state()
+    for nav_state in (14, 18, 18, 14):
+        node.status_callback(status_message(nav_state=nav_state))
+        node.control_loop()
+    node.status_received_at = time.monotonic() - 10.0
+    env._enter_safe_state()
+    env._enter_safe_state()
+    node.control_loop()
+
+    land_commands = [m for m in node.command_pub.messages if m.command == 21]
+    assert len(land_commands) == 1
+    assert env._landing_pending is True
+    assert node.land_setpoints_released is True
