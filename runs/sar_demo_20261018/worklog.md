@@ -393,3 +393,15 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 
 - **Memory risk:** RAM was 3.40–3.48 of 3.91 GB, and swap rose steadily from 1771 to 1991 MiB over the 2.7 min (it was 567–634 MiB at 21:47–21:51). The WSL VM is capped at 4 GB by `.wslconfig`.
 - **Outcome:** no arming, takeoff, flight command, or episode. The vehicle stayed disarmed and landed.
+
+## WSL memory investigation and leak finding: stack stopped, nothing applied — 2026-10-18 22:10–22:15 UTC
+
+- **`.wslconfig`:** `C:\Users\HP\.wslconfig` is `memory=4GB, swap=4GB`. It was backed up unchanged to `/home/hp/uav_ros_experiments/wsl_memory_20261018/` and **not edited**.
+- **Host RAM:** could not be read, because Windows interop is not registered in this WSL instance. The user must check it on the Windows side.
+- **Leak found** (RSS + swap, 60 s sampling): the gz GUI grew **+99 MiB/min** (2832 → 2931 MiB) and the gz server **+37 MiB/min** (1704 → 1741 MiB). VM swap grew +170 MiB/min, reaching 3386 of 4096 MiB, which projected exhaustion within about 4 min. The cause is not established (Mesa D3D12, gz GUI, or other).
+- **Action:** to prevent an uncontrolled OOM kill, the simulation stack (not WSL) was stopped through the documented gate.
+  - 22:14:14: gate PASS (status 1.45 s, land 1.04 s old; disarmed, landed).
+  - All manifest groups exited, and the recorder (PID 60949) was stopped with SIGINT.
+  - Memory returned to 1.1 GB RAM used and 0.7 GB swap.
+  - QGroundControl (session 58696) is still running.
+- **State:** no simulation is running. The vehicle was never armed in run `restart_20261018_oakd3_gpu`. Its evidence is preserved in that run's `logs/`.
