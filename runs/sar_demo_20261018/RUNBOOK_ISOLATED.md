@@ -248,3 +248,66 @@ Isolated native baseline (`/home/hp/uav_ros_experiments/landing_baseline_2026101
 **Tests:** 11 new offline tests in `test_px4_uav_env_safety.py`; the full suite has 106 passing. Five of them fail against the pre-change code.
 
 **Analysis scripts and outputs:** `/home/hp/uav_ros_experiments/landing_interleave_analysis_20261018/` (`analyze_landing_setpoints.py`, `primary_05_27_19.txt`, `baseline_06_34_31.txt`, `telemetry_recorder.py`, `estimator_flags_probe.py`).
+
+## Supervised target-reaching test with OAK-D perception (prepared; not yet flown)
+
+**Prerequisites:** explicit user approval, the full offline suite passing on the current HEAD, one attempt only, no automatic retry. Every command below is in the repository root with ROS Jazzy and `px4_ros2_ws` sourced.
+
+### 1. Release the current stack (only if fresh telemetry is landed and disarmed)
+
+```bash
+ROS_DOMAIN_ID=43 .venv/bin/python tools/verify_shutdown_state.py --duration 5 --expected-system-id 2
+.venv/bin/python tools/isolated_sitl.py stop --run-dir runs/sar_demo_20261018/<current run>
+```
+
+### 2. Start the project-asset profile
+
+It uses the versioned world and model, the camera bridge, the perception node, and the GUI.
+
+```bash
+.venv/bin/python tools/isolated_sitl.py start --profile sar_oakd \
+  --run-dir runs/sar_demo_20261018/restart_<YYYYMMDD>_oakd1
+```
+
+### 3. Readiness gates
+
+All must pass; otherwise stop and report.
+
+```bash
+export ROS_DOMAIN_ID=43 GZ_PARTITION=uav_sar_validation_20261018_instance1 \
+  SAR_LIDAR_TOPIC=/world/sar_walls/model/x500_lidar_2d_oakd_1/link/link/sensor/lidar_2d_v2/scan
+.venv/bin/python tools/verify_isolated_topics.py --duration 8      # PASS, preflight=True, disarmed, landed, 49 sectors
+.venv/bin/python tools/verify_world_target.py                      # live target matches sim/worlds/sar_walls.sdf
+ros2 topic hz /uav/camera/rgb/image     # record; expect about 1-2 Hz wall (software rendering)
+ros2 topic hz /uav/camera/depth/image
+ros2 topic hz /uav/target_perception    # must be publishing (detected=0 is expected on the ground: the target is ~45 deg right of the spawn heading)
+gz topic -e -n 10 -t /world/sar_walls/stats | grep real_time_factor
+```
+
+- **Real-time factor:** RTF with the camera rendering must be **≥ 0.35**. The takeoff gate allows 15 s of simulation time within a 45 s wall ceiling.
+- **Control inputs:** `/fmu/in/*` must have 0 publishers.
+- **Estimator:** must be healthy.
+
+### 4. Record and fly once
+
+```bash
+.venv/bin/python -u tools/telemetry_recorder.py runs/sar_demo_20261018/<run>/logs/telemetry_full.jsonl 14400 &
+.venv/bin/python -u run_target_reaching_episode.py --log runs/sar_demo_20261018/<run>/logs/episode.jsonl \
+  --i-confirm-supervised-flight
+```
+
+**Expected sequence:**
+1. Takeoff gates pass.
+2. Speed-limited fly-to the start pose (NED 0,0, −1.8 m, heading east).
+3. The baseline rotates right, detects the target, and approaches with altitude hold.
+4. Success at ≤ 0.75 m.
+5. Return to start, NAV_LAND, AUTO_LAND stream release, auto-disarm, and `close()`.
+
+If takeoff, the start-pose flight, or landing confirmation fails: do not retry, do not force-disarm, and leave the stack running if landed/disarmed is not confirmed.
+
+### Unverified live
+
+- The altitude-hold setpoint form (position z + xy velocity under the Offboard position flag).
+- The carrot fly-to.
+- The simulation-time step clock.
+- Live camera rates and perception latency with the camera on the flying model.

@@ -202,3 +202,30 @@ Source/configuration inspection established:
   5. A kinematic stand-in environment that uses the same builder and task code, plus a baseline controller and offline tests.
   6. PPO: SB3 and CPU torch with pinned gymnasium/numpy; training and evaluation entry points; a short smoke run on the stand-in; comparison with the baseline.
   7. Preparation for one supervised SITL target-reaching test (gated; not flown without review).
+
+## Camera perception to target-reaching RL: offline implementation — 2026-10-18 15:30 UTC
+
+The live `restart_20261018_visible3` stack was not modified, and no flight was made. Commits, each with the full suite passing:
+
+| Commit | Content |
+|---|---|
+| `d8c9fe6` | Versioned `sim/worlds/sar_walls.sdf` (target sphere) and `sim/models/x500_lidar_2d_oakd` (stock LiDAR mount + OAK-D Lite at 30° down). Opt-in `isolated_sitl.py --profile sar_oakd` (run-local `gz_env.sh`, airframe 4013, camera bridge remapped to `/uav/camera/*`). The model loaded and merged in a paused, sensorless Gazebo load test. |
+| `5e8f797` | `target_perception.py` (ROS-free; RGB segmentation, depth mapping, sphere fit, edge and invalid-depth handling, versioned message) and `target_perception_node.py`. Tests use synthetic ray-cast frames and three recorded Gazebo stand frames (RGB-only bearing within 0.2°). |
+| `64782e5` | Observation contract `sar_obs_v1` (65 values, `docs/OBSERVATION_CONTRACT.md`), privileged `sar_task.py`, LiDAR-only publisher, and environment integration. A leak test shows that moving the ground-truth target leaves the observation identical. |
+| `12d0fee` | Fly-to start pose, return to start before landing after success or timeout, altitude hold, simulation-time 0.1 s steps (local-position stamp clock; timesync is only ~1 Hz sim), and the `verify_world_target.py` gate. |
+| `631db3f` | Offline kinematic stand-in (same contract and task code) and the observation-only baseline. Baseline: 10/10 fixed-start and 25/25 randomized-start successes in tests. |
+| `1b41b92` | PPO pipeline: SB3 2.9.0 + torch 2.9.1+cpu installed, gymnasium 1.3.0 and numpy 1.26.4 unchanged. 20k-step smoke run in `runs/rl/ppo_smoke_20261018_s1` (git-ignored). |
+
+**Smoke-run results** (30 held-out episodes):
+
+| Policy | Fixed start | Randomized start |
+|---|---|---|
+| Baseline | 100% success, 8.4 s | 100% success, 14.0 s |
+| Random | 100% collision | 17% success, 47% collision |
+| PPO, 20k steps | 0% success, 100% timeout | 0% success, 100% timeout |
+
+During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converged to not moving (avoiding the −100 collision penalty against a sparse +100 success). Reward shaping or curriculum work is needed before extended training.
+
+**Offline validation:** the real `PX4UAVEnv`, `target_perception_node`, and LiDAR publisher were constructed with real rclpy in an empty ROS domain (49). Subscriptions and publishers match the PX4 DDS topic names.
+
+**Next step:** the gated supervised SITL test procedure is in `RUNBOOK_ISOLATED.md`; it has not been run.
