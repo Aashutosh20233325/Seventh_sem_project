@@ -257,3 +257,45 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 
     Perception processing took about 6 ms per frame. `detected=0` and status 1 (no target), as expected with the target about 45° right of the spawn heading. The pipeline is publishing and the data is fresh, but no detection was exercised live.
 - **Outcome:** no flight command was sent and the vehicle was never armed. There was no retry. The stack was left running, disarmed and landed.
+
+## GstCameraSystem investigation, project server config, and camera verification (no flight) — 2026-10-18
+
+- **Start (16:38 UTC):** `master` at `ce3e319`. The `restart_20261018_oakd1` stack was running: disarmed, Hold, landed/at_rest, no failsafe; gz server at 439% CPU.
+- **GstCameraSystem (read-only findings):**
+  - It is loaded only by PX4's `src/modules/simulation/gz_bridge/server.config`, through `GZ_SIM_SERVER_CONFIG_PATH` in `gz_env.sh`.
+  - Source (`src/modules/simulation/gz_plugins/gstreamer/GstCameraSystem.cpp`): it discovers new `components::Camera` sensors (RGB only, not the depth camera), subscribes to their Gazebo image topic, and H.264-encodes the frames for UDP:5600 (or RTMP) ground-station video.
+  - It does not render, publish to ROS, touch depth, or feed perception. The project path is: sensors system render → Gazebo topics → `ros_gz_bridge` → `/uav/camera/*` → `target_perception_node` → `/uav/target_perception` → `PX4UAVEnv`.
+  - Runtime evidence: `libgstnvcodec`, `libnvidia-encode` and `libcuda` were mapped (NVENC on the GPU). GStreamer threads used about 8% CPU against **353% for Mesa llvmpipe** threads plus 91% for the gz main loop.
+- **Change (reversible):** `sim/server_no_gstreamer.config` is PX4's active `server.config` (01193bf86b) with only the `custom::GstCameraSystem` entry removed; a test enforces this. The `sar_oakd` profile exports it in the run-local `gz_env.sh`. `isolated_sitl.py start --px4-server-config` restores PX4's default. PX4 files, the camera model, resolution, frame rates, depth and LiDAR are unchanged.
+- **Restart:**
+  - Shutdown gate PASS at 16:49:44 (`--duration 10`).
+  - The manifest-gated stop passed (status 1.8 s, land 0.7 s old); all processes exited, and the recorder was stopped with SIGINT.
+  - `restart_20261018_oakd2` started 16:52:38–16:52:53 with GUI. The gz server (PID 58064) uses `sim/server_no_gstreamer.config` with no GStreamer libraries or threads.
+- **WSLg incident:** the `weston` compositor segfaulted at 16:48:57 (dmesg; not an OOM kill), and WSLg restarted it. QGroundControl (PID 24821) exited ("Wayland connection broke"). It was relaunched from the SHA-256-verified AppImage with the same private config, in its own process group (session leader 58696, QGC 58699, UDP 14550). Records: `restart_20261018_oakd2/qgroundcontrol.process.json`, log `restart_20261018_oakd2/logs/qgroundcontrol.log`. The weston crash cause is unknown; it occurred while both gz windows were software-rendering.
+- **Readiness (oakd2):**
+  - PX4: disarmed, Hold, `preflight=true`, `gcs_connection_lost=false`, landed/at_rest, "Ready for takeoff".
+  - 49 LiDAR sectors; the live target matches the versioned world.
+  - The topic probe still FAILS on land-detection freshness (5.6 s old; land samples arrive every ~6.3 s wall at this simulation rate).
+- **Performance** (`/home/hp/uav_ros_experiments/gst_camera_perf_20261018/`, 60 s windows, simulation rate from sensor stamps):
+
+| Metric | Before (with GStreamer) | After (without) |
+|---|---|---|
+| Sim rate (RGB / depth / PX4 stamps) | 0.177 / 0.178 / 0.194 | 0.161 / 0.163 / 0.239 |
+| gz server CPU | 459% | 425% |
+| RGB wall rate | 1.56 Hz | 2.50 Hz |
+| Depth wall rate | 2.26 Hz | 2.43 Hz |
+| Perception wall rate | 1.76 Hz | 2.60 Hz |
+| Max perception gap | 2.87 s | 1.55 s |
+| PX4 status gap, median | 2.9 s | 3.2 s |
+| GPU | 3–4% / 316 MiB (NVENC) | 0% / 0 MiB |
+| RAM / swap used | 2275 / 1135 MiB | 3037 / 782 MiB (VM capped at 4 GB by `.wslconfig`) |
+
+  The **0.35 gate still fails.**
+- **Positive ground-only detection** (vehicle untouched, disarmed; target fixture moved only):
+  - At 16:56:15 the static target was moved with `set_pose` to ENU (2.2, 0.4, 0.055), about 2.2 m ahead and left of the parked drone. All 109 of 109 messages over 40 s reported detected.
+  - Range-valid (sphere-fit) messages: bearing **+10.33° to +10.34°** against +10.30° ground truth; horizontal range **2.235 m** against 2.236 m.
+  - Messages without a depth frame paired within 0.1 s fell back to bearing-only (`range_valid=0`, confidence 0.2, +14.78°: edge-cut centroid bias), as designed.
+  - The target was restored to (3, −3, 0.055); `verify_world_target.py` passed 3/3.
+  - The GUI screenshot does not show the temporarily moved static sphere; the GUI scene does not appear to refresh a static-model `set_pose`, while the server-side camera did render it.
+- **Root cause and recommendation:** the Gazebo server and GUI each run 16 Mesa llvmpipe threads. `/dev/dri` is absent; only `/dev/dxg` exists. `libd3d12.so` resolves through `ldconfig` but is never loaded, so Mesa's D3D12 (GPU) driver is not selected. Next step for approval: select Mesa D3D12 for the gz processes (`GALLIUM_DRIVER=d3d12`, `sar_oakd` profile only, reversible), validated first, plus consider a larger WSL memory cap.
+- **State:** no arming, takeoff, or flight command. The `oakd2` stack, QGC, and the recorder are running; the vehicle is disarmed and landed.

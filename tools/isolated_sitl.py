@@ -53,6 +53,8 @@ TERM_GRACE_SECONDS = 5.0
 # Project-versioned simulation assets (profile "sar_oakd").
 SIM_MODELS = PROJECT / "sim/models"
 SIM_WORLDS = PROJECT / "sim/worlds"
+# PX4's gz server.config minus GstCameraSystem (UDP H.264 streaming of the first RGB camera).
+SIM_SERVER_CONFIG = PROJECT / "sim/server_no_gstreamer.config"
 # ROS names for the camera; the gz depth topics are global ("/depth_camera",
 # "/camera_info"), so the bridge remaps them onto unambiguous project names.
 CAMERA_RGB_TOPIC = "/uav/camera/rgb/image"
@@ -72,6 +74,7 @@ class Profile:
         autostart: int | None,
         project_assets: bool,
         camera: bool,
+        server_config: Path | None = None,
     ) -> None:
         self.name = name
         self.world = world
@@ -79,6 +82,7 @@ class Profile:
         self.autostart = autostart
         self.project_assets = project_assets
         self.camera = camera
+        self.server_config = server_config
         self.model_instance = f"{sim_model.removeprefix('gz_')}_{PX4_INSTANCE}"
         model_prefix = f"/world/{world}/model/{self.model_instance}"
         self.lidar_topic = f"{model_prefix}/link/link/sensor/lidar_2d_v2/scan"
@@ -118,7 +122,9 @@ PROFILES = {
     # Versioned project world/model: target sphere plus LiDAR and OAK-D Lite.
     # Airframe 4013 (x500_lidar_2d) only aliases the x500 airframe, so it is
     # reused explicitly for the combined model.
-    "sar_oakd": Profile("sar_oakd", "sar_walls", "gz_x500_lidar_2d_oakd", 4013, True, True),
+    "sar_oakd": Profile(
+        "sar_oakd", "sar_walls", "gz_x500_lidar_2d_oakd", 4013, True, True, SIM_SERVER_CONFIG
+    ),
 }
 LEGACY = PROFILES["legacy"]
 
@@ -203,8 +209,8 @@ def ros_environment(
     return env
 
 
-def gz_env_script(profile: Profile = LEGACY) -> bytes:
-    """PX4's generated gz_env.sh, plus project asset paths for project profiles."""
+def gz_env_script(profile: Profile = LEGACY, px4_server_config: bool = False) -> bytes:
+    """PX4's generated gz_env.sh, plus project asset paths (and server config) for project profiles."""
     script = PX4_GZ_ENV.read_bytes()
     if not profile.project_assets:
         return script
@@ -216,6 +222,8 @@ def gz_env_script(profile: Profile = LEGACY) -> bytes:
         f"export GZ_SIM_RESOURCE_PATH={shlex.quote(str(SIM_MODELS))}:"
         f"{shlex.quote(str(SIM_WORLDS))}:$GZ_SIM_RESOURCE_PATH\n"
     )
+    if profile.server_config is not None and not px4_server_config:
+        override += f"export GZ_SIM_SERVER_CONFIG_PATH={shlex.quote(str(profile.server_config))}\n"
     return script + override.encode()
 
 
@@ -341,6 +349,8 @@ def _check_paths(run_dir: Path, profile: Profile = LEGACY) -> None:
     if not PX4_BINARY.is_file() or not os.access(PX4_BINARY, os.X_OK):
         raise IsolationError(f"PX4 SITL binary is unavailable: {PX4_BINARY}")
     required = [PX4_DATA, PX4_GZ_ENV, XRCE_AGENT, ROS_SETUP, ROS_OVERLAY, ROS2, PYTHON]
+    if profile.server_config is not None:
+        required.append(profile.server_config)
     if profile.project_assets:
         required += [
             SIM_WORLDS / f"{profile.world}.sdf",
@@ -357,13 +367,13 @@ def _check_paths(run_dir: Path, profile: Profile = LEGACY) -> None:
         raise IsolationError(f"Run directory already contains data; refusing overwrite: {run_dir}")
 
 
-def _prepare_run_dir(run_dir: Path, profile: Profile = LEGACY) -> None:
+def _prepare_run_dir(run_dir: Path, profile: Profile = LEGACY, px4_server_config: bool = False) -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
     rootfs = run_dir / "px4_rootfs"
     (rootfs / "fs").mkdir(parents=True)
     # PX4's local gz startup script sources ./gz_env.sh from its working dir.
     # Copy the configuration, never link writable PX4 storage to the shared tree.
-    (rootfs / "gz_env.sh").write_bytes(gz_env_script(profile))
+    (rootfs / "gz_env.sh").write_bytes(gz_env_script(profile, px4_server_config))
     (run_dir / "logs").mkdir()
 
 
@@ -441,14 +451,14 @@ def _verified_record(record: dict[str, Any]) -> bool:
     )
 
 
-def start(run_dir: Path, profile: Profile = LEGACY) -> None:
+def start(run_dir: Path, profile: Profile = LEGACY, px4_server_config: bool = False) -> None:
     run_dir = run_dir.resolve()
     _check_paths(run_dir, profile)
     _assert_endpoint_free(XRCE_PORT)
     env_base = sourced_environment()
     env_ros = ros_environment(env_base, profile=profile)
     _assert_domain_and_partition_unused(env_ros)
-    _prepare_run_dir(run_dir, profile)
+    _prepare_run_dir(run_dir, profile, px4_server_config)
 
     manifest: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -460,6 +470,11 @@ def start(run_dir: Path, profile: Profile = LEGACY) -> None:
         "xrce_udp_port": XRCE_PORT,
         "gazebo_partition": GZ_PARTITION,
         "profile": profile.name,
+        "gz_server_config": (
+            str(profile.server_config)
+            if profile.server_config is not None and not px4_server_config
+            else "PX4 default (gz_env.sh)"
+        ),
         "world": profile.world,
         "model": profile.sim_model,
         "components": {},
@@ -673,10 +688,15 @@ def main(argv: list[str] | None = None) -> int:
         help="start only: simulation assets (legacy: PX4 walls/x500_lidar_2d; "
         "sar_oakd: versioned sim/ world with target and LiDAR+OAK-D model)",
     )
+    parser.add_argument(
+        "--px4-server-config",
+        action="store_true",
+        help="start only: revert to PX4's default gz server.config (re-enables GstCameraSystem)",
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "start":
-            start(args.run_dir, PROFILES[args.profile])
+            start(args.run_dir, PROFILES[args.profile], args.px4_server_config)
         elif args.command == "status":
             status(args.run_dir)
         elif args.command == "stop":

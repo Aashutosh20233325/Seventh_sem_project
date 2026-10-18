@@ -262,6 +262,8 @@ ROS_DOMAIN_ID=43 .venv/bin/python tools/verify_shutdown_state.py --duration 5 --
 
 ### 2. Start the project-asset profile
 
+`sar_oakd` uses `sim/server_no_gstreamer.config`: PX4's Gazebo server config without the GstCameraSystem UDP video streamer, which the camera, ROS, and perception path does not use. To restore PX4's default config, add `--px4-server-config`.
+
 It uses the versioned world and model, the camera bridge, the perception node, and the GUI.
 
 ```bash

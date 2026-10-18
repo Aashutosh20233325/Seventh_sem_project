@@ -244,3 +244,36 @@ def test_ros_consumers_add_perception_only_for_camera_profile():
     ros = isolated_sitl.ros_environment({}, profile=isolated_sitl.PROFILES["sar_oakd"])
     assert ros["SAR_CAMERA_DEPTH_TOPIC"] == isolated_sitl.CAMERA_DEPTH_TOPIC
     assert "SAR_CAMERA_RGB_TOPIC" not in isolated_sitl.ros_environment({})
+
+
+def _plugins(path):
+    import xml.etree.ElementTree as ET
+    return [
+        (p.get("filename"), p.get("name"),
+         (tuple(sorted(p.attrib.items())), tuple((c.tag, (c.text or "").strip()) for c in p)))
+        for p in ET.parse(path).getroot().iter("plugin")
+    ]
+
+
+def test_project_server_config_is_px4_default_minus_only_gstreamer_streaming():
+    px4 = _plugins(isolated_sitl.PX4_SOURCE / "src/modules/simulation/gz_bridge/server.config")
+    project = _plugins(isolated_sitl.SIM_SERVER_CONFIG)
+
+    removed = [p for p in px4 if p not in project]
+    assert [(f, n) for f, n, _ in removed] == [("libGstCameraSystem.so", "custom::GstCameraSystem")]
+    assert [p for p in project if p not in px4] == []
+    names = {n for _, n, _ in project}
+    assert {"gz::sim::systems::Sensors", "gz::sim::systems::Physics", "custom::OpticalFlowSystem"} <= names
+
+
+def test_sar_oakd_uses_project_server_config_and_can_revert():
+    profile = isolated_sitl.PROFILES["sar_oakd"]
+    line = f"export GZ_SIM_SERVER_CONFIG_PATH={isolated_sitl.SIM_SERVER_CONFIG}\n"
+
+    default = isolated_sitl.gz_env_script(profile).decode()
+    reverted = isolated_sitl.gz_env_script(profile, px4_server_config=True).decode()
+
+    assert default.endswith(line)                       # after PX4's own export, so it wins
+    assert default.index(line) > default.index("export GZ_SIM_SERVER_CONFIG_PATH=$PX4_GZ_SERVER_CONFIG")
+    assert line not in reverted
+    assert line not in isolated_sitl.gz_env_script(isolated_sitl.PROFILES["legacy"]).decode()
