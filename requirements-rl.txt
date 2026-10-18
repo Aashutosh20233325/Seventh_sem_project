@@ -1,0 +1,8 @@
+# RL training dependencies for the project .venv (CPU only). Install with:
+#   .venv/bin/python -m pip install -r requirements-rl.txt --extra-index-url https://download.pytorch.org/whl/cpu
+# Pins: SB3 2.9.0 is the first release that accepts gymnasium 1.3 (2.7.x/2.8.0 require <1.3).
+# gymnasium and numpy are pinned to the versions the environment and ROS tooling already use.
+gymnasium==1.3.0
+numpy==1.26.4
+stable-baselines3==2.9.0
+torch==2.9.1+cpu

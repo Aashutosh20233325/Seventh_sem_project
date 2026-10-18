@@ -5,3 +5,4 @@ __pycache__/
 /runs/sar_demo_20261018/px4_rootfs_baseline.tar
 /runs/sar_demo_20261018/isolated_sitl*/
 /runs/sar_demo_20261018/restart_*/
+/runs/rl/
