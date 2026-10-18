@@ -4,8 +4,10 @@ This runbook describes the separately owned PX4 instance 1 validation stack.
 It leaves the pre-existing PX4 instance 0, its rootfs, ULog archive, XRCE
 agent, Gazebo partition, bridge, and observation publisher untouched. It does
 not authorize flight by itself. The currently verified isolated instance is
-disarmed and publishes fresh telemetry, but fails preflight checks and does
-not have a valid heading reference; **do not arm it** until those gates pass.
+disarmed, landed, and publishes fresh telemetry with passing preflight checks.
+PX4's final heading-good flag is expected to remain false on the ground with
+the configured in-flight magnetometer alignment; **do not start a flight until
+the supervised test is explicitly approved**.
 
 ## Isolation layout
 
@@ -60,10 +62,14 @@ LiDAR, and exactly 54 finite observation values; it additionally requires
 landed/at-rest/disarmed state and no PX4 failsafe. That validates communications
 and observations, not readiness to fly. Before any future flight experiment,
 separately require `pre_flight_checks_pass=true`, `failsafe=false`, fresh valid
-local position, `heading_good_for_control=true`, and a fresh landed/disarmed
-state. Keep the one-attempt-per-experiment rule and monitor ACKs, actual
-altitude, setpoint continuity, and landing telemetry. An accepted command ACK
-is not proof of vehicle movement.
+local position and initially aligned/observable yaw with healthy estimator
+flags, a fresh landed/disarmed state, and GCS connectivity. With this PX4 EKF
+configuration the final `heading_good_for_control` flag is only expected after
+the bounded vertical ascent clears the in-flight magnetometer alignment
+threshold; the controller must hold position until that flag is fresh and
+true before horizontal velocity control. Keep the one-attempt-per-experiment
+rule and monitor ACKs, actual altitude, setpoint continuity, and landing
+telemetry. An accepted command ACK is not proof of vehicle movement.
 
 The optional `tools/ground_idle_controller.py` process subscribes to telemetry
 and creates PX4 input publishers while remaining in `GROUND`; its timer
@@ -148,8 +154,9 @@ connected, a fresh read-only
 sample showed system ID 2, disarmed, `nav_state=4`, `failsafe=false`,
 `pre_flight_checks_pass=true`, and `gcs_connection_lost=false`; landed, at-rest,
 and ground-contact were true. Position was valid and the LiDAR/observation
-checks passed. The remaining test gate is
-`heading_good_for_control=false`, so do not start the smoke test.
+checks passed. `heading_good_for_control=false` is expected while grounded in
+this EKF alignment mode, as detailed below; its transition during a vertical
+ascent has not yet been verified live.
 
 Fresh estimator flags report tilt/yaw alignment complete, magnetic heading
 fusion active, heading observable/consistent, and no bad-heading fault, while
@@ -161,13 +168,33 @@ loss flag is expected until a controller streams setpoints.
 PX4 source defines `heading_good_for_control` as final yaw alignment. With
 magnetometer heading enabled, final alignment also requires the in-flight
 magnetometer alignment flag to complete; the current ULog has that flag false
-while disarmed. Thus the current false heading flag is consistent with a
-grounded vehicle and does not by itself establish the preflight failure. The
-environment suppresses body-forward velocity until the flag becomes valid.
-PX4 startup logs also included `ekf2 missing data` and `no heading reference`
-during startup. With the GCS connected, fresh status now reports preflight
-checks passing; the heading-valid gate remains false and blocks the smoke test.
-No flight command or smoke test has been issued against the isolated run.
+while disarmed. PX4 sets that flag only after detecting flight and exceeding
+1.5 m height above ground, then waits more than one second after its magnetic
+alignment reset. The ULog confirms healthy magnetic fusion and no heading or
+magnetometer fault; the false final-heading flag is therefore an expected
+ground-state result, not an evidenced sensor failure or current preflight
+failure.
+
+The prior controller held NED z at -1.0 m and left position-hold takeoff as
+soon as z reached -0.8 m. That sequence could not cross PX4's 1.5 m in-flight
+magnetic alignment threshold, so the environment's body-forward velocity gate
+could remain closed for the whole episode. The controller now holds z=-1.8 m
+until fresh PX4 `heading_good_for_control=true` arrives, while retaining the
+existing -0.8 m altitude gate and all current timeouts. Initial preflight must
+still pass with fresh landed/disarmed state, valid position, aligned and
+observable yaw, healthy magnetometer flags, GCS connected, and no failsafe.
+The final heading flag is verified during the bounded vertical ascent before
+the environment enters velocity control. This code path has not been tested
+in flight; the live instance remains grounded and no control command has been
+sent.
+
+The ULog's IMU and magnetometer inputs are fresh and non-faulted: combined IMU
+data is recorded at 250 Hz, magnetometer readings are finite with zero error
+count and are fused, and heading/mag innovation checks pass. `dist_bottom_valid`
+is false because no range/terrain aid is active; this is separate from the
+heading-validity condition. The ROS domain does not currently publish a
+`VehicleMagnetometer` sample, so magnetometer freshness is evidenced from the
+PX4 ULog, not a ROS subscription. No PX4 parameter or arming check was changed.
 
 The project restart on 2026-10-18 stopped both previously running SITL stacks
 only after fresh landed/at-rest/disarmed telemetry. The original stack exited

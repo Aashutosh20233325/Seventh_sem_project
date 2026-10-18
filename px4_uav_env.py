@@ -36,6 +36,11 @@ VEHICLE_COMMAND_ACK_TOPIC = "/fmu/out/vehicle_command_ack_v1"
 
 class PX4ControllerNode(Node):
 
+    # PX4's AUTO magnetometer path completes final heading alignment only
+    # after rising above 1.5 m HAGL. Hold position above that threshold with
+    # margin until fresh heading-good telemetry arrives.
+    TAKEOFF_TARGET_Z = -1.8
+
     def __init__(self, env):
 
         super().__init__("px4_uav_env_controller")
@@ -516,7 +521,7 @@ class PX4ControllerNode(Node):
             if self.phase == "TAKEOFF":
                 self.publish_offboard_mode(position_mode=True)
                 self.publish_position_setpoint(
-                    z_target=-1.0,
+                    z_target=self.TAKEOFF_TARGET_Z,
                     x_target=self.takeoff_target_x,
                     y_target=self.takeoff_target_y,
                 )
@@ -1056,7 +1061,8 @@ class PX4UAVEnv(gym.Env):
                         f"for the airborne state (wall elapsed="
                         f"{now - wall_start_at:.3f} s, "
                         f"PX4 elapsed={0.0 if takeoff_start_px4_time is None or px4_sim_time is None else (px4_sim_time - takeoff_start_px4_time) / 1_000_000:.3f} s, "
-                        f"NED z={node.z:.3f} m)."
+                        f"NED z={node.z:.3f} m, "
+                        f"heading_good_for_control={node.heading_valid})."
                     )
 
                 if (
@@ -1066,6 +1072,7 @@ class PX4UAVEnv(gym.Env):
                     and node.arming_state == armed_state
                     and node.nav_state == offboard_state
                     and node.z <= -0.8
+                    and node.heading_valid
                 ):
                     return
 
@@ -1086,6 +1093,8 @@ class PX4UAVEnv(gym.Env):
                         unmet.append(f"Offboard mode (nav_state={node.nav_state})")
                     if node.z > -0.8:
                         unmet.append(f"altitude (NED z={node.z:.3f}, need <= -0.8 m)")
+                    if not node.heading_valid:
+                        unmet.append("final heading alignment (heading_good_for_control=false)")
                     raise TimeoutError(
                         "PX4 simulation-time takeoff limit reached while "
                         "waiting for: "

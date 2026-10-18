@@ -677,6 +677,42 @@ def test_takeoff_position_setpoint_holds_current_xy_and_keeps_altitude_gate(
     assert node.setpoint_pub.messages[0].position == [-0.4, 0.25, -1.0]
 
 
+def test_takeoff_phase_holds_above_px4_mag_alignment_height(monkeypatch):
+    module = load_environment(monkeypatch)
+
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    node = SimpleNamespace(
+        condition=threading.Condition(),
+        phase="TAKEOFF",
+        offboard_pub=Publisher(),
+        setpoint_pub=Publisher(),
+        timestamp=lambda: 123,
+        action=np.zeros(2, dtype=np.float32),
+        takeoff_target_x=0.3,
+        takeoff_target_y=-0.2,
+        TAKEOFF_TARGET_Z=module.PX4ControllerNode.TAKEOFF_TARGET_Z,
+        takeoff_setpoint_count=0,
+        takeoff_stream_started_at=None,
+        takeoff_stream_last_at=None,
+    )
+    node.publish_offboard_mode = (
+        module.PX4ControllerNode.publish_offboard_mode.__get__(node)
+    )
+    node.publish_position_setpoint = (
+        module.PX4ControllerNode.publish_position_setpoint.__get__(node)
+    )
+
+    module.PX4ControllerNode.control_loop(node)
+
+    assert node.setpoint_pub.messages[-1].position == [0.3, -0.2, -1.8]
+
+
 def test_observation_wait_rejects_cached_stale_array(monkeypatch):
     module = load_environment(monkeypatch)
     env = make_environment(module)
@@ -1263,6 +1299,69 @@ def test_airborne_wait_survives_observed_1_71_second_status_interval(monkeypatch
 
     assert env.node.z <= -0.8
     assert env.node.status_received_at > time.monotonic() - 1.0
+
+
+def test_airborne_wait_holds_takeoff_until_final_heading_alignment(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_takeoff_environment(module)
+    env.node.arming_state = 2
+    env.node.nav_state = 14
+    env.node.z = -0.8
+    env.node.heading_valid = False
+    env.node.position_received_at = time.monotonic()
+    env.node.status_received_at = time.monotonic()
+    env.node.px4_sim_time_us = 1_000_000
+    env.node.px4_sim_time_received_at = time.monotonic()
+
+    def report_heading_alignment():
+        time.sleep(0.04)
+        with env.node.condition:
+            now = time.monotonic()
+            env.node.heading_valid = True
+            env.node.position_received_at = now
+            env.node.status_received_at = now
+            env.node.px4_sim_time_us += 1_000
+            env.node.px4_sim_time_received_at = now
+            env.node.condition.notify_all()
+
+    reporter = threading.Thread(target=report_heading_alignment)
+    reporter.start()
+    started = time.monotonic()
+    env._wait_for_airborne_state()
+    elapsed = time.monotonic() - started
+    reporter.join()
+
+    assert env.node.heading_valid
+    assert elapsed >= 0.035
+
+
+def test_takeoff_timeout_reports_missing_final_heading_alignment(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_takeoff_environment(module)
+    env.node.arming_state = 2
+    env.node.nav_state = 14
+    env.node.z = -0.8
+    env.node.heading_valid = False
+
+    def advance_past_takeoff_deadline():
+        time.sleep(0.03)
+        with env.node.condition:
+            now = time.monotonic()
+            env.node.px4_sim_time_us += 21_000
+            env.node.px4_sim_time_received_at = now
+            env.node.status_received_at = now
+            env.node.position_received_at = now
+            env.node.condition.notify_all()
+
+    clock_updater = threading.Thread(target=advance_past_takeoff_deadline)
+    clock_updater.start()
+
+    with pytest.raises(
+        TimeoutError,
+        match=r"final heading alignment \(heading_good_for_control=false\)",
+    ):
+        env._wait_for_airborne_state()
+    clock_updater.join()
 
 
 def test_velocity_forward_action_is_suppressed_without_valid_heading(monkeypatch):
