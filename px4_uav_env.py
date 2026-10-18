@@ -48,6 +48,12 @@ class PX4ControllerNode(Node):
     # after rising above 1.5 m HAGL. Hold position above that threshold with
     # margin until fresh heading-good telemetry arrives.
     TAKEOFF_TARGET_Z = -1.8
+    # Fly-to-pose ("carrot") setpoints stay within this distance of the vehicle,
+    # which bounds PX4's position-controller speed to roughly 1 m/s.
+    CARROT_DISTANCE = 0.8
+    # Position-message stamp increments larger than this are XRCE time-offset
+    # resyncs, not simulation progress, and are not added to the sim clock.
+    SIM_CLOCK_MAX_INCREMENT_US = 200_000
 
     def __init__(self, env):
 
@@ -177,6 +183,11 @@ class PX4ControllerNode(Node):
         self.perception_received_at = None
         self.px4_sim_time_us = None
         self.px4_sim_time_received_at = None
+        # Fine-grained simulation clock accumulated from local-position stamps.
+        self.sim_clock_us = None
+        self._last_position_stamp = None
+        self.hold_z = self.TAKEOFF_TARGET_Z
+        self.goal = None              # (x, y, z, yaw) NED for the REPOSITION phase
 
         self.arming_state = 1
         self.nav_state = 4
@@ -269,7 +280,18 @@ class PX4ControllerNode(Node):
                 ))
             )
             self.position_received_at = time.monotonic()
+            self._advance_sim_clock(int(msg.timestamp))
             self.condition.notify_all()
+
+    def _advance_sim_clock(self, stamp_us):
+        previous = self._last_position_stamp
+        self._last_position_stamp = stamp_us
+        if self.sim_clock_us is None:
+            self.sim_clock_us = 0
+            return
+        increment = stamp_us - previous
+        if 0 < increment <= self.SIM_CLOCK_MAX_INCREMENT_US:
+            self.sim_clock_us += increment
 
     def perception_callback(self, msg):
         decoded = target_perception.decode(msg.data)
@@ -463,6 +485,7 @@ class PX4ControllerNode(Node):
         z_target=-1.0,
         x_target=0.0,
         y_target=0.0,
+        yaw=float("nan"),
     ):
 
         msg = TrajectorySetpoint()
@@ -493,12 +516,20 @@ class PX4ControllerNode(Node):
             float("nan"),
         ]
 
-        msg.yaw = float("nan")
+        msg.yaw = float(yaw)
         msg.yawspeed = float("nan")
 
         self.setpoint_pub.publish(msg)
 
-    def publish_velocity_setpoint(self):
+    def carrot_setpoint(self):
+        """Position setpoint toward self.goal, at most CARROT_DISTANCE from the vehicle."""
+        gx, gy, gz, gyaw = self.goal
+        dx, dy = gx - self.x, gy - self.y
+        distance = math.hypot(dx, dy)
+        scale = min(1.0, self.CARROT_DISTANCE / distance) if distance > 1e-6 else 0.0
+        return self.x + dx * scale, self.y + dy * scale, gz, gyaw
+
+    def publish_velocity_setpoint(self, hold_z=None):
 
         speed_action = float(
             self.action[0]
@@ -552,17 +583,14 @@ class PX4ControllerNode(Node):
         msg.timestamp = self.timestamp()
 
         # Position is not controlled in velocity mode.
-        msg.position = [
-            float("nan"),
-            float("nan"),
-            float("nan"),
-        ]
-
-        msg.velocity = [
-            vx,
-            vy,
-            0.0,
-        ]
+        if hold_z is None:
+            # LAND-phase heartbeat: zero vertical velocity, no position axis.
+            msg.position = [float("nan")] * 3
+            msg.velocity = [vx, vy, 0.0]
+        else:
+            # Episode flight: PX4 holds altitude by position; xy by velocity.
+            msg.position = [float("nan"), float("nan"), float(hold_z)]
+            msg.velocity = [vx, vy, float("nan")]
 
         msg.acceleration = [
             float("nan"),
@@ -602,9 +630,17 @@ class PX4ControllerNode(Node):
                 self.takeoff_stream_last_at = now
                 self.takeoff_setpoint_count += 1
                 self.condition.notify_all()
+            elif self.phase == "REPOSITION":
+                x, y, z, yaw = self.carrot_setpoint()
+                self.publish_offboard_mode(position_mode=True)
+                self.publish_position_setpoint(
+                    z_target=z, x_target=x, y_target=y, yaw=yaw
+                )
             elif self.phase == "VELOCITY":
-                self.publish_offboard_mode(position_mode=False)
-                self.publish_velocity_setpoint()
+                # The position flag enables PX4's per-axis position/velocity
+                # control: NaN xy position uses the velocity setpoint.
+                self.publish_offboard_mode(position_mode=True)
+                self.publish_velocity_setpoint(hold_z=self.hold_z)
             elif self.phase == "LAND":
                 # While PX4 still reports OFFBOARD, keep the heartbeat and
                 # zero-velocity setpoints; after fresh AUTO_LAND, PX4's native
@@ -736,6 +772,17 @@ class PX4UAVEnv(gym.Env):
     # The RGB camera measured ~2 Hz wall under software rendering.
     PERCEPTION_MAX_AGE = 1.5
     TARGET_MEMORY_EXPIRY = 8.0          # s of simulation time
+    # Repeatable episode start (PX4 local NED; the spawn heading is east).
+    START_X = 0.0
+    START_Y = 0.0
+    START_YAW = math.pi / 2
+    REPOSITION_TOLERANCE = 0.3          # m horizontal
+    REPOSITION_Z_TOLERANCE = 0.25       # m
+    REPOSITION_YAW_TOLERANCE = math.radians(10.0)
+    REPOSITION_SPEED_TOLERANCE = 0.25   # m/s
+    REPOSITION_SIM_TIMEOUT = 40.0       # s of simulation time
+    REPOSITION_WALL_TIMEOUT = 120.0     # s wall ceiling
+    STEP_DURATION = 0.1                 # s of simulation time per action
 
     def __init__(self):
 
@@ -831,8 +878,8 @@ class PX4UAVEnv(gym.Env):
                 raise ValueError("Observation needs fresh, valid PX4 local position.")
             if not odometry_fresh:
                 raise ValueError("Observation needs fresh PX4 odometry (yaw rate).")
-            if node.px4_sim_time_us is None:
-                raise ValueError("Observation needs the reconstructed PX4 simulation clock.")
+            if node.sim_clock_us is None:
+                raise ValueError("Observation needs the PX4 simulation clock.")
             ego = sar_observation.EgoState(
                 x=node.x, y=node.y, z=node.z, vx=node.vx, vy=node.vy,
                 heading=node.heading, yaw_rate=node.yaw_rate,
@@ -842,7 +889,7 @@ class PX4UAVEnv(gym.Env):
                 None if node.perception_received_at is None
                 else now - node.perception_received_at
             )
-            now_s = node.px4_sim_time_us / 1_000_000
+            now_s = node.sim_clock_us / 1_000_000
         return self.builder.build(
             raw, self.previous_action, ego, perception, perception_age, now_s
         )
@@ -865,6 +912,7 @@ class PX4UAVEnv(gym.Env):
         self,
         timeout=2.0,
         previous_counter=None,
+        min_sim_clock_us=None,
     ):
 
         start = time.monotonic()
@@ -873,7 +921,14 @@ class PX4UAVEnv(gym.Env):
 
             while True:
 
-                if (
+                sim_ready = (
+                    min_sim_clock_us is None
+                    or (
+                        self.node.sim_clock_us is not None
+                        and self.node.sim_clock_us >= min_sim_clock_us
+                    )
+                )
+                if sim_ready and (
                     previous_counter is None
                     or self.node.observation_counter
                     > previous_counter
@@ -902,7 +957,7 @@ class PX4UAVEnv(gym.Env):
 
                 if remaining <= 0:
                     raise TimeoutError(
-                        "No /uav/observation message received."
+                        "No fresh LiDAR sectors after the action's simulation-time duration."
                     )
 
                 self.node.condition.wait(
@@ -1227,9 +1282,77 @@ class PX4UAVEnv(gym.Env):
         self._wait_for_command_ack(arm_command, ack_counter)
         self._wait_for_airborne_state()
 
+        # Repeatable episode start: fly (speed-limited) to the start pose.
+        self._fly_to_start()
+
         with self.node.condition:
+            self.node.hold_z = self.node.TAKEOFF_TARGET_Z
             self.node.phase = "VELOCITY"
             self.node.condition.notify_all()
+
+    def _fly_to_start(self):
+        self._fly_to(self.START_X, self.START_Y, self.node.TAKEOFF_TARGET_Z, self.START_YAW)
+
+    def _fly_to(self, x, y, z, yaw):
+        """Offboard position flight to a pose; bounded in simulation and wall time.
+
+        Requires fresh armed OFFBOARD status and valid local position throughout. Raises on any
+        failure so callers fall back to the existing safe-state landing.
+        """
+        node = self.node
+        max_age = self.TAKEOFF_TELEMETRY_MAX_AGE
+        wall_deadline = time.monotonic() + self.REPOSITION_WALL_TIMEOUT
+        with node.condition:
+            node.goal = (float(x), float(y), float(z), float(yaw))
+            node.phase = "REPOSITION"
+            sim_start = node.sim_clock_us
+            node.condition.notify_all()
+            while True:
+                now = time.monotonic()
+                position_fresh = (
+                    node.position_received_at is not None
+                    and now - node.position_received_at <= max_age
+                    and node.position_valid
+                )
+                if not position_fresh:
+                    raise TimeoutError("Fly-to stopped: local position stale or invalid.")
+                status_fresh = (
+                    node.status_received_at is not None
+                    and now - node.status_received_at <= self.TAKEOFF_STATUS_UPDATE_TIMEOUT
+                )
+                if status_fresh and (
+                    node.arming_state != VehicleStatus.ARMING_STATE_ARMED
+                    or node.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD
+                    or node.failsafe
+                ):
+                    raise RuntimeError(
+                        "Fly-to stopped: vehicle left armed OFFBOARD "
+                        f"(arming_state={node.arming_state}, nav_state={node.nav_state}, "
+                        f"failsafe={node.failsafe})."
+                    )
+                yaw_error = abs(math.atan2(math.sin(node.heading - yaw), math.cos(node.heading - yaw)))
+                arrived = (
+                    math.hypot(x - node.x, y - node.y) <= self.REPOSITION_TOLERANCE
+                    and abs(z - node.z) <= self.REPOSITION_Z_TOLERANCE
+                    and math.hypot(node.vx, node.vy) <= self.REPOSITION_SPEED_TOLERANCE
+                    and yaw_error <= self.REPOSITION_YAW_TOLERANCE
+                    and node.heading_valid
+                )
+                if arrived:
+                    return
+                if sim_start is None:
+                    sim_start = node.sim_clock_us
+                sim_elapsed = (
+                    0.0 if sim_start is None or node.sim_clock_us is None
+                    else (node.sim_clock_us - sim_start) / 1_000_000
+                )
+                if sim_elapsed >= self.REPOSITION_SIM_TIMEOUT or now >= wall_deadline:
+                    raise TimeoutError(
+                        f"Fly-to ({x:.2f}, {y:.2f}) not reached: distance "
+                        f"{math.hypot(x - node.x, y - node.y):.2f} m, yaw error "
+                        f"{math.degrees(yaw_error):.1f} deg, sim {sim_elapsed:.1f} s."
+                    )
+                node.condition.wait(timeout=0.1)
 
     def _wait_until_landed(
         self,
@@ -1306,6 +1429,25 @@ class PX4UAVEnv(gym.Env):
             or attitude_collision
             or self.node.failsafe
         )
+
+    def _return_to_start_then_land(self):
+        """Leave the target area before landing so the vehicle never lands on the target.
+
+        Any failure during the return (stale telemetry, mode change, timeout) falls back to the
+        unchanged safe-state landing at the current position.
+        """
+        with self.node.condition:
+            self._episode_active = False
+            self.node.action[:] = 0.0
+        try:
+            self._fly_to_start()
+        except Exception as exc:
+            warnings.warn(
+                f"Return to start failed; landing in place instead: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self._enter_safe_state()
 
     def _enter_safe_state(self):
 
@@ -1460,13 +1602,16 @@ class PX4UAVEnv(gym.Env):
             self._distance_to_target()
         )
 
-        previous_counter = (
-            self.node.observation_counter
-        )
-
-        # Send action to PX4 controller.
+        # Send action to PX4 controller; the step lasts STEP_DURATION of
+        # simulation time and ends on the first fresh LiDAR sectors after that.
         with self.node.condition:
             self.node.action[:] = action
+            previous_counter = self.node.observation_counter
+            start_clock = self.node.sim_clock_us
+            self._step_min_sim_clock_us = (
+                None if start_clock is None
+                else start_clock + int(self.STEP_DURATION * 1_000_000)
+            )
 
         try:
             return self._step_after_action(
@@ -1488,11 +1633,12 @@ class PX4UAVEnv(gym.Env):
         previous_counter,
     ):
 
-        # Wait for a fresh observation.
+        # Wait for a fresh observation after the action's simulation-time duration.
         raw_observation = (
             self._wait_for_observation(
                 timeout=2.0,
                 previous_counter=previous_counter,
+                min_sim_clock_us=getattr(self, "_step_min_sim_clock_us", None),
             )
         )
 
@@ -1511,7 +1657,10 @@ class PX4UAVEnv(gym.Env):
         self.previous_action = action.copy()
         observation = self._convert_observation(raw_observation)
 
-        if outcome.terminated or outcome.truncated:
+        if outcome.reason in ("success", "timeout"):
+            self._return_to_start_then_land()
+        elif outcome.terminated or outcome.truncated:
+            # Collision (proximity, attitude, or failsafe): land where we are.
             self._enter_safe_state()
 
         info = {

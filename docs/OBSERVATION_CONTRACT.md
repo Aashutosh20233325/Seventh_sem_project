@@ -75,3 +75,23 @@ The action is `Box([0, -1], [1, 1])`.
 - **Terminated:** on success or collision.
 - **Truncated:** at `max_steps` = 600.
 - **Collision** is any of: minimum LiDAR sector < 0.25 m, |roll| or |pitch| > 1.2 rad, or a PX4 failsafe.
+
+## Episode lifecycle and control (`px4_uav_env.py`)
+
+1. **`reset()`** waits for fresh landed-and-disarmed telemetry, then takes off. The takeoff gates are unchanged: Offboard stream, preflight, arm ACK, NED z ≤ −0.8 m, and fresh `heading_good_for_control`.
+2. **Start pose.** The vehicle then flies to the fixed start pose: NED (0, 0), z = −1.8 m, heading π/2 (east, the spawn heading).
+   - Flight uses Offboard position setpoints ("carrot" at most 0.8 m ahead, so roughly ≤ 1 m/s).
+   - It must end within 0.3 m horizontal, 0.25 m vertical, 0.25 m/s and 10° yaw.
+   - It is bounded by 40 s of simulation time and 120 s wall, and aborts if the vehicle leaves armed OFFBOARD, a failsafe appears, or local position goes stale.
+   - Any failure enters the existing safe-state landing.
+3. **Each `step()`** applies the action for **0.1 s of simulation time**.
+   - The step ends on the first fresh LiDAR sectors after that, within a 2 s wall bound.
+   - The simulation clock accumulates `vehicle_local_position` stamp increments of 0–200 ms. Larger jumps are XRCE time-offset resyncs and are ignored. PX4 timesync alone updates only about every 1 s of simulation time.
+   - Altitude is held at −1.8 m by a position setpoint on z while x and y follow the velocity command (Offboard `position` flag; per-axis NaN).
+4. **Episode end:**
+   - On **success** (≤ 0.75 m) or **timeout**, the vehicle flies back to the start pose before the normal NAV_LAND, so it never lands on the target sphere. If that return fails, it lands in place.
+   - On **collision**, it lands in place immediately.
+   - Landing keeps the committed `e10b92e` behaviour: the zero-velocity heartbeat continues until fresh AUTO_LAND, then setpoints stop, and completion requires fresh landed-and-disarmed telemetry.
+5. **World consistency.** `tools/verify_world_target.py` is a read-only gate. It checks that the live Gazebo `target` pose matches `sim/worlds/sar_walls.sdf` within 5 cm before a flight.
+
+**Verified offline only:** the altitude-hold setpoint form, the start-pose flight, and simulation-time stepping are unit-tested. Their PX4 behaviour needs the gated SITL check.

@@ -133,6 +133,10 @@ class FakeNode:
         self.position_received_at = time.monotonic()
         self.px4_sim_time_us = 1_000_000
         self.px4_sim_time_received_at = time.monotonic()
+        self.sim_clock_us = 1_000_000
+        self.TAKEOFF_TARGET_Z = -1.8
+        self.hold_z = -1.8
+        self.goal = None
         self.takeoff_setpoint_count = 20
         self.takeoff_stream_started_at = time.monotonic() - 1.2
         self.takeoff_stream_last_at = time.monotonic()
@@ -262,6 +266,7 @@ def make_takeoff_environment(module):
     # The timer-driven setpoint stream is tested separately; transition tests
     # begin after that stream-readiness gate has succeeded.
     env._wait_for_takeoff_setpoint_stream = lambda: None
+    env._fly_to_start = lambda: None                 # tested separately
     return env
 
 
@@ -736,7 +741,7 @@ def test_observation_wait_rejects_cached_stale_array(monkeypatch):
     env._wait_for_observation = module.PX4UAVEnv._wait_for_observation.__get__(env)
     env.node.observation_received_at = time.monotonic() - 2.0
 
-    with pytest.raises(TimeoutError, match="/uav/observation"):
+    with pytest.raises(TimeoutError, match="LiDAR sectors"):
         env._wait_for_observation(timeout=0.01)
 
 
@@ -817,7 +822,7 @@ def test_safe_state_waits_for_inflight_velocity_publish_then_stops_old_action(
     published_actions = []
     env.node.publish_offboard_mode = lambda position_mode: None
 
-    def block_first_velocity_publish():
+    def block_first_velocity_publish(hold_z=None):
         published_actions.append(env.node.action.copy())
         if len(published_actions) == 1:
             publishing.set()
@@ -1957,7 +1962,7 @@ def test_observation_refuses_stale_or_missing_onboard_state(monkeypatch, stale):
     elif stale == "odometry":
         env.node.odometry_received_at = None
     else:
-        env.node.px4_sim_time_us = None
+        env.node.sim_clock_us = None
 
     with pytest.raises(ValueError):
         env._convert_observation(np.full(49, 7.5, dtype=np.float32))
@@ -2009,6 +2014,7 @@ def test_success_step_terminates_with_privileged_info_only(monkeypatch):
     env._distance_to_target = lambda: 0.5
     safe_calls = []
     env._enter_safe_state = lambda: safe_calls.append(True)
+    env._fly_to_start = lambda: None
 
     obs, reward, terminated, truncated, info = env._step_after_action(
         np.array([0.2, 0.0], dtype=np.float32), 0.9, 0)
@@ -2034,3 +2040,183 @@ def test_action_turn_sign_is_ned_clockwise_and_speed_follows_heading(monkeypatch
     assert published[0].yawspeed == pytest.approx(0.5)
     assert published[0].velocity[0] == pytest.approx(0.0, abs=1e-9)
     assert published[0].velocity[1] == pytest.approx(1.0)
+
+
+# ----------------------------------------------------------------------
+# Episode control: sim clock, altitude hold, reposition, terminal routing
+# ----------------------------------------------------------------------
+
+
+def test_sim_clock_accumulates_position_stamps_and_ignores_resync_jumps(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = SimpleNamespace(sim_clock_us=None, _last_position_stamp=None,
+                           SIM_CLOCK_MAX_INCREMENT_US=200_000)
+    for stamp in (1_000_000, 1_020_000, 1_040_000, 31_040_000, 31_060_000, 31_050_000, 31_070_000):
+        module.PX4ControllerNode._advance_sim_clock(node, stamp)
+    # +20 +20 (jump ignored) +20 (backwards ignored) +20
+    assert node.sim_clock_us == 80_000
+
+
+def test_velocity_phase_holds_altitude_by_position_and_land_keeps_zero_vz(monkeypatch):
+    module = load_environment(monkeypatch)
+    published = []
+    node = SimpleNamespace(action=np.array([0.5, 0.0]), heading=0.0, heading_valid=True,
+                           timestamp=lambda: 1, setpoint_pub=SimpleNamespace(publish=published.append))
+
+    module.PX4ControllerNode.publish_velocity_setpoint(node, hold_z=-1.8)
+    module.PX4ControllerNode.publish_velocity_setpoint(node)
+
+    flight, land = published
+    assert math.isnan(flight.position[0]) and math.isnan(flight.position[1])
+    assert flight.position[2] == -1.8 and math.isnan(flight.velocity[2])
+    assert flight.velocity[0] == pytest.approx(0.5)
+    assert all(math.isnan(v) for v in land.position) and land.velocity[2] == 0.0
+
+
+def test_velocity_phase_uses_position_offboard_flag_with_hold(monkeypatch):
+    module = load_environment(monkeypatch)
+    modes, holds = [], []
+    node = SimpleNamespace(condition=threading.Condition(), phase="VELOCITY", hold_z=-1.8,
+                           publish_offboard_mode=lambda position_mode: modes.append(position_mode),
+                           publish_velocity_setpoint=lambda hold_z=None: holds.append(hold_z))
+    module.PX4ControllerNode.control_loop(node)
+    assert modes == [True] and holds == [-1.8]
+
+
+def test_reposition_carrot_is_speed_limited_and_carries_yaw(monkeypatch):
+    module = load_environment(monkeypatch)
+    published = []
+    node = SimpleNamespace(
+        condition=threading.Condition(), phase="REPOSITION", x=0.0, y=0.0, goal=(5.0, 0.0, -1.8, 1.57),
+        CARROT_DISTANCE=0.8, timestamp=lambda: 1, offboard_pub=SimpleNamespace(publish=lambda m: None),
+        setpoint_pub=SimpleNamespace(publish=published.append),
+    )
+    node.carrot_setpoint = module.PX4ControllerNode.carrot_setpoint.__get__(node)
+    node.publish_offboard_mode = module.PX4ControllerNode.publish_offboard_mode.__get__(node)
+    node.publish_position_setpoint = module.PX4ControllerNode.publish_position_setpoint.__get__(node)
+
+    module.PX4ControllerNode.control_loop(node)
+
+    assert published[0].position == pytest.approx([0.8, 0.0, -1.8])
+    assert published[0].yaw == pytest.approx(1.57)
+    node.x = 4.9
+    assert node.carrot_setpoint()[:2] == pytest.approx((5.0, 0.0))
+
+
+def fly_environment(module):
+    env = make_environment(module)
+    env._fly_to = module.PX4UAVEnv._fly_to.__get__(env)
+    env.REPOSITION_SIM_TIMEOUT = 0.5
+    env.REPOSITION_WALL_TIMEOUT = 2.0
+    node = env.node
+    node.arming_state, node.nav_state, node.failsafe = 2, 14, False
+    node.status_received_at = time.monotonic()
+    node.heading = math.pi / 2
+    node.vx = node.vy = 0.0
+    node.x, node.y, node.z = 0.1, -0.1, -1.8
+    return env
+
+
+def test_fly_to_returns_on_arrival_within_tolerances(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = fly_environment(module)
+    env._fly_to(0.0, 0.0, -1.8, math.pi / 2)
+    assert env.node.phase == "REPOSITION" and env.node.goal == (0.0, 0.0, -1.8, math.pi / 2)
+
+
+def test_fly_to_times_out_in_simulation_time(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = fly_environment(module)
+    env.node.x = 3.0
+
+    def advance():
+        for _ in range(30):
+            time.sleep(0.01)
+            with env.node.condition:
+                env.node.sim_clock_us += 100_000
+                env.node.position_received_at = time.monotonic()
+                env.node.condition.notify_all()
+    threading.Thread(target=advance, daemon=True).start()
+
+    with pytest.raises(TimeoutError, match="not reached"):
+        env._fly_to(0.0, 0.0, -1.8, math.pi / 2)
+
+
+@pytest.mark.parametrize("fault", ["disarmed", "not_offboard", "failsafe", "stale_position"])
+def test_fly_to_aborts_when_vehicle_state_is_unsafe(monkeypatch, fault):
+    module = load_environment(monkeypatch)
+    env = fly_environment(module)
+    env.node.x = 3.0
+    if fault == "disarmed":
+        env.node.arming_state = 1
+    elif fault == "not_offboard":
+        env.node.nav_state = 18
+    elif fault == "failsafe":
+        env.node.failsafe = True
+    else:
+        env.node.position_received_at = time.monotonic() - 5.0
+    with pytest.raises((RuntimeError, TimeoutError)):
+        env._fly_to(0.0, 0.0, -1.8, math.pi / 2)
+
+
+@pytest.mark.parametrize("reason_distance,collide,expected", [
+    (0.5, False, "return"),        # success
+    (5.0, True, "land"),           # collision lands in place
+])
+def test_terminal_routing_returns_to_start_only_when_safe_to_leave(monkeypatch, reason_distance, collide, expected):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env._distance_to_target = lambda: reason_distance
+    env._collision_detected = lambda raw: collide
+    calls = []
+    env._return_to_start_then_land = lambda: calls.append("return")
+    env._enter_safe_state = lambda: calls.append("land")
+
+    env._step_after_action(np.array([0.2, 0.0], dtype=np.float32), 0.9, 0)
+
+    assert calls == [expected]
+
+
+def test_timeout_truncation_returns_to_start(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.current_step = env.max_steps - 1
+    calls = []
+    env._return_to_start_then_land = lambda: calls.append("return")
+    env._enter_safe_state = lambda: calls.append("land")
+
+    *_, truncated, info = env._step_after_action(np.array([0.2, 0.0], dtype=np.float32), 10.0, 0)
+
+    assert truncated and info["reason"] == "timeout" and calls == ["return"]
+
+
+def test_failed_return_falls_back_to_landing_in_place(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    calls = []
+
+    def fail():
+        raise TimeoutError("blocked")
+    env._fly_to_start = fail
+    env._enter_safe_state = lambda: calls.append("land")
+
+    with pytest.warns(RuntimeWarning, match="landing in place"):
+        module.PX4UAVEnv._return_to_start_then_land(env)
+
+    assert calls == ["land"] and not env._episode_active
+    np.testing.assert_array_equal(env.node.action, [0.0, 0.0])
+
+
+def test_step_observation_waits_for_simulation_time(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env._wait_for_observation = module.PX4UAVEnv._wait_for_observation.__get__(env)
+    env.node.observation_counter = 5
+    env.node.observation_received_at = time.monotonic()
+    env.node.sim_clock_us = 1_000_000
+
+    with pytest.raises(TimeoutError, match="simulation-time"):
+        env._wait_for_observation(timeout=0.05, previous_counter=4, min_sim_clock_us=1_100_000)
+
+    env.node.sim_clock_us = 1_100_000
+    assert env._wait_for_observation(timeout=0.05, previous_counter=4, min_sim_clock_us=1_100_000) is not None
