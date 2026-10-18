@@ -358,3 +358,38 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Other gates:** passed in all windows. Status gap ≤ 1.78 s, land gap ≤ 3.10 s, perception gap ≤ 0.60 s; RGB 6.8–7.6 Hz, depth 6.5–7.8 Hz, perception 7.2–8.1 Hz, LiDAR 10 Hz; gz server CPU 111–117%, GPU 35–51%.
 - **Outcome:** the approved episode was **not** run. No arming, takeoff, or flight command was sent, and the threshold was not changed.
 - **Note:** the measurement subscribes to the 1080p RGB stream itself, which adds load. The rates show a downward drift over the check (0.377 → 0.35–0.36).
+
+## Monitoring-overhead reduction and repeat stability check: PASS, no flight — 2026-10-18 22:00–22:04 UTC
+
+- **CPU audit (`top`, 5 s):**
+
+| Process | CPU | Note |
+|---|---|---|
+| QGroundControl | 134% | llvmpipe UI rendering plus GstVideoWorker threads |
+| gz server | 117% | |
+| gz GUI | 112% | |
+| ros_gz_bridge | 41% | |
+| PX4 | 26% | |
+| perception node | 26% | |
+| recorder | 10% | |
+
+  - Outside a measurement, the only subscriber to the RGB and depth images is `target_perception`.
+  - The previous stability check (`measure.py`) added a second full-HD RGB and depth image subscriber, making the bridge serialize every frame twice and decoding it in Python. That load is not present in flight.
+- **Change (measurement only; not in the repository):** `measure_light.py` (copied to `logs/`) takes camera rates and the camera-clock simulation rate from `/uav/camera/{rgb,depth}/camera_info`, which carry each frame's sensor stamp, and subscribes to no images. The recorder, perception node, LiDAR, bridge, PX4, GUI, and QGroundControl were untouched.
+- **QGroundControl** was kept running and not modified. Closing it would remove the GCS heartbeat, and with `NAV_DLL_ACT=2` that sets `gcs_connection_lost` and fails preflight. Minimising its window would be a manual user action; it was not needed.
+- **Six 25 s windows** (`logs/stability_light_w1..6.json`, `logs/stability_check_light.txt`), with the same gates as before. **All six PASSED.**
+
+| Metric | Range across the six windows |
+|---|---|
+| Sim rate (RGB / depth / PX4) | minimum 0.359 / 0.359 / 0.376; range 0.359–0.446 |
+| Status gap max | 1.35–1.81 s |
+| Land gap max | 2.61–3.18 s |
+| Perception gap max | 0.49–0.65 s |
+| RGB / depth frames (camera_info) | 10.8–11.9 Hz wall |
+| Perception | 7.0–7.8 Hz |
+| LiDAR | 10 Hz |
+| CPU: gz server / GUI / QGC / bridge / perception / recorder / PX4 | ~115 / ~115 / 125–165 / ~41 / ~25 / ~10 / ~26% |
+| GPU | 35–48%, 563 MiB |
+
+- **Memory risk:** RAM was 3.40–3.48 of 3.91 GB, and swap rose steadily from 1771 to 1991 MiB over the 2.7 min (it was 567–634 MiB at 21:47–21:51). The WSL VM is capped at 4 GB by `.wslconfig`.
+- **Outcome:** no arming, takeoff, flight command, or episode. The vehicle stayed disarmed and landed.
