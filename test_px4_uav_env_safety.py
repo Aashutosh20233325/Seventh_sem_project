@@ -1288,6 +1288,25 @@ def test_velocity_forward_action_is_suppressed_without_valid_heading(monkeypatch
     assert published[0].yawspeed == pytest.approx(0.2)
 
 
+def test_ground_phase_controller_publishes_no_control_messages(monkeypatch):
+    module = load_environment(monkeypatch)
+
+    class Publisher:
+        def publish(self, _message):
+            raise AssertionError("GROUND phase must not publish control messages")
+
+    node = SimpleNamespace(
+        condition=threading.Condition(),
+        phase="GROUND",
+        offboard_pub=Publisher(),
+        setpoint_pub=Publisher(),
+        action=np.zeros(2, dtype=np.float32),
+        landing_complete=False,
+    )
+
+    module.PX4ControllerNode.control_loop(node)
+
+
 def test_airborne_wait_stops_if_status_update_exceeds_bounded_interval(monkeypatch):
     module = load_environment(monkeypatch)
     env = make_takeoff_environment(module)

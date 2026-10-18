@@ -24,7 +24,7 @@ not have a valid heading reference; **do not arm it** until those gates pass.
 - Each component has a manifest-owned process session and a separate log.
 
 The verified active run is
-`/home/hp/uav_ros/runs/sar_demo_20261018/isolated_sitl_instance1_noshell/`.
+`/home/hp/uav_ros/runs/sar_demo_20261018/restart_20261018/`.
 Check its manifest before doing anything. Do not start another run if its
 components are alive.
 
@@ -37,22 +37,46 @@ source /home/hp/px4_ros2_ws/install/setup.bash
 source .venv/bin/activate
 
 python tools/isolated_sitl.py status \
-  --run-dir runs/sar_demo_20261018/isolated_sitl_instance1_noshell
+  --run-dir runs/sar_demo_20261018/restart_20261018
 ROS_DOMAIN_ID=43 GZ_PARTITION=uav_sar_validation_20261018_instance1 \
 SAR_UAV_MODEL_NAME=x500_lidar_2d_1 \
 SAR_LIDAR_TOPIC=/world/walls/model/x500_lidar_2d_1/link/link/sensor/lidar_2d_v2/scan \
 python tools/verify_isolated_topics.py --duration 8
 ```
 
+The active GCS is the official QGroundControl v5.1.5 x86_64 AppImage. Its
+verified SHA-256 is
+`9a47e4cf269d9e4f897f582f6b19aa7ebf1e9e67c9d68a532a45b541354bc344`.
+The binary, private config/cache, log, and process record are stored inside
+the active run directory. PX4's startup log reports its Normal MAVLink link
+uses localhost UDP 14550, which QGroundControl binds. Treat GCS as connected
+only when fresh PX4 status has `gcs_connection_lost=false`; ROS discovery alone
+does not establish this. The QGroundControl process sent a working heartbeat,
+but its GUI window was not visible in this WSL session; startup logged Mesa/EGL
+renderer warnings.
+
 The telemetry probe must report fresh status, land detection, local position,
 LiDAR, and exactly 54 finite observation values; it additionally requires
 landed/at-rest/disarmed state and no PX4 failsafe. That validates communications
 and observations, not readiness to fly. Before any future flight experiment,
 separately require `pre_flight_checks_pass=true`, `failsafe=false`, fresh valid
-local position, `heading_good_for_control=true`, no active controller, and a
-fresh landed/disarmed state. Keep the one-attempt-per-experiment rule and
-monitor ACKs, actual altitude, setpoint continuity, and landing telemetry.
-An accepted command ACK is not proof of vehicle movement.
+local position, `heading_good_for_control=true`, and a fresh landed/disarmed
+state. Keep the one-attempt-per-experiment rule and monitor ACKs, actual
+altitude, setpoint continuity, and landing telemetry. An accepted command ACK
+is not proof of vehicle movement.
+
+The optional `tools/ground_idle_controller.py` process subscribes to telemetry
+and creates PX4 input publishers while remaining in `GROUND`; its timer
+publishes no control messages in this phase. Run it only once, after sourcing
+ROS Jazzy and the workspace:
+
+```bash
+ROS_DOMAIN_ID=43 .venv/bin/python tools/ground_idle_controller.py
+```
+
+This verifies DDS subscriber matching, not a continuous Offboard stream. The
+stream is only verified in the takeoff sequence, which must remain gated by
+preflight and estimator health.
 
 Before a PX4 command, the environment requires an observed `VehicleStatus`
 system ID. Offboard and arm commands additionally require status no older than
@@ -104,6 +128,12 @@ SIGINT/SIGTERM only to exact manifest-owned process groups and never sends
 SIGKILL. If the gate fails, leave PX4/Gazebo and telemetry running and inspect
 the vehicle state; do not bypass the gate.
 
+If the idle controller is running, stop its exact group recorded in
+`ground_controller.process.json` after fresh landed/disarmed telemetry is
+confirmed, then run the manifest-gated SITL stop. QGroundControl is recorded
+separately in `qgroundcontrol.process.json`; stop that exact group only after
+the PX4 stack has stopped. It is not part of the SITL manifest.
+
 ```bash
 python tools/isolated_sitl.py stop \
   --run-dir runs/sar_demo_YYYYMMDD/run_name
@@ -111,18 +141,22 @@ python tools/isolated_sitl.py stop \
 
 ## Current result and evidence
 
-The no-shell run has fresh status/position/land telemetry, fresh Gazebo LiDAR,
+The active run has fresh status/position/land telemetry, fresh Gazebo LiDAR,
 and a fresh finite 54-value observation. Its PX4 ULog and parameters are under
-that run's `px4_rootfs/fs/`, not the shared build rootfs. The last read-only
-diagnostic showed disarmed, `failsafe=false`, but
-`pre_flight_checks_pass=false`, `gcs_connection_lost=true`,
-`heading_good_for_control=false`, and `dist_bottom_valid=false`. The isolated
-ULog records `NAV_DLL_ACT=2`; the local `rcAndDataLinkCheck` code blocks all
-arming modes when this parameter requires a GCS and `gcs_connection_lost` is
-true. This is a confirmed readiness blocker. A QGroundControl executable or
-running GCS was not found in the checked WSL/Windows paths; do not change the
-PX4 parameter to bypass the gate. The offboard-signal-lost flag is expected
-before a controller publishes any Offboard setpoints.
+that run's `px4_rootfs/fs/`, not the shared build rootfs. With QGroundControl
+connected, a fresh read-only
+sample showed system ID 2, disarmed, `nav_state=4`, `failsafe=false`,
+`pre_flight_checks_pass=true`, and `gcs_connection_lost=false`; landed, at-rest,
+and ground-contact were true. Position was valid and the LiDAR/observation
+checks passed. The remaining test gate is
+`heading_good_for_control=false`, so do not start the smoke test.
+
+Fresh estimator flags report tilt/yaw alignment complete, magnetic heading
+fusion active, heading observable/consistent, and no bad-heading fault, while
+`cs_mag_aligned_in_flight=false` and `cs_in_air=false`. This agrees with PX4's
+current false `heading_good_for_control` value while disarmed. Do not replace
+that PX4 flag with a weaker estimate or alter arming checks. The offboard-signal
+loss flag is expected until a controller streams setpoints.
 
 PX4 source defines `heading_good_for_control` as final yaw alignment. With
 magnetometer heading enabled, final alignment also requires the in-flight
@@ -131,14 +165,26 @@ while disarmed. Thus the current false heading flag is consistent with a
 grounded vehicle and does not by itself establish the preflight failure. The
 environment suppresses body-forward velocity until the flag becomes valid.
 PX4 startup logs also included `ekf2 missing data` and `no heading reference`
-during startup; the later estimator stream shows yaw alignment true, but a
-complete current arming-check report is still needed after a GCS is available.
+during startup. With the GCS connected, fresh status now reports preflight
+checks passing; the heading-valid gate remains false and blocks the smoke test.
 No flight command or smoke test has been issued against the isolated run.
+
+The project restart on 2026-10-18 stopped both previously running SITL stacks
+only after fresh landed/at-rest/disarmed telemetry. The original stack exited
+on Ctrl-C through its identified PX4 terminal; its exact XRCE, ROS-Gazebo
+bridge, and observation-publisher groups exited on SIGINT. The isolated stack
+was stopped through its manifest-gated shutdown. The new active run above was
+then started with the dedicated rootfs. Its first topic probe ran before DDS
+discovery completed and saw no samples; PX4 subsequently synchronized, created
+its DDS writers, and later bounded probes passed. The idle GROUND-phase
+controller finds one subscriber each on PX4's Offboard mode and trajectory
+setpoint topics and publishes no control messages. No Offboard stream, command
+ACK, arming, or takeoff test has been attempted.
 
 The initial isolated launch omitted PX4's `-i 1` and was refused because
 instance 0 was already running. Its log and manifest are preserved. A
 separately verified cleanup removed only that failed attempt's XRCE agent and
 idle session guards. The first successful no-shell launch produced an
 excessive prompt log; it was stopped only after the telemetry gate passed, and
-its 7.3 MB ULog is preserved. The current no-shell ULog continues to be written
-under the isolated rootfs.
+its 7.3 MB ULog is preserved. The active restart run's ULog continues to be
+written under its isolated rootfs.
