@@ -405,3 +405,23 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - Memory returned to 1.1 GB RAM used and 0.7 GB swap.
   - QGroundControl (session 58696) is still running.
 - **State:** no simulation is running. The vehicle was never armed in run `restart_20261018_oakd3_gpu`. Its evidence is preserved in that run's `logs/`.
+
+## gz memory growth: GPU (D3D12) vs software rendering, no flight — 2026-10-18 22:28–22:46 UTC
+
+- **Setup:** WSL kept at 4 GB RAM and 4 GB swap (no `.wslconfig` change, no `wsl --shutdown`). Evidence and method: `/home/hp/uav_ros_experiments/gz_memory_growth_20261018/README.md`.
+- **Tests:** two 300 s visible-GUI tests, each through the gated start and stop. The vehicle stayed disarmed and landed; camera, depth, and LiDAR were unchanged. Samples every 10 s.
+
+| | **A** `restart_20261018_memA_gpu_gui` (D3D12, RTX 3050) | **B** `restart_20261018_memB_sw_gui` (`--software-rendering`, llvmpipe) |
+|---|---|---|
+| gz server anon+swap | **+47 MiB/min** | **flat (−0.5 MiB/min)** |
+| gz GUI anon+swap | **+96 MiB/min** | **flat (+1.0 MiB/min)** |
+| Mapping count | server +32/min, GUI +60/min | flat |
+| File-backed memory | flat | reclaimed |
+| GPU memory | flat 573–581 MiB | 0 |
+| End-window sim rate (RGB / depth / PX4) | 0.335 / 0.336 / 0.393 | 0.171 / 0.177 / 0.178 |
+| Readiness probe | passed | could not pass (land gaps ~6 s against the 4 s limit); sampled as a recorded no-flight diagnostic. Attempt 1, which did not sample, is preserved. |
+
+- **Conclusion:** the continuous growth is specific to the D3D12 rendering path and occurs in **both** gz processes. The GUI contributes about two thirds. It is anonymous host memory with linearly increasing mappings, not GPU memory, and it has not plateaued. That supports a genuine leak in the D3D12 path or its interaction with ogre2; the exact allocator is unproven.
+- **Headless diagnostic:** not needed and not run.
+- **Test A margin:** Test A's end-window sim rate (0.335) was below the 0.35 gate under sampler, recorder, and probe load, so the D3D12 margin remains thin.
+- **State:** no simulation running; QGroundControl (58699) running. Nothing was armed or flown, and no project code changed.
