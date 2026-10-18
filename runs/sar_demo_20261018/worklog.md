@@ -190,3 +190,15 @@ Source/configuration inspection established:
   - The target model is an uncommitted edit to the shared PX4 `walls.sdf`.
   - SB3 and torch are not installed.
 - No environment, reward, or observation change was made. Proposals are in §6 of the audit and await review.
+
+## Implementation plan: camera perception to target-reaching RL — 2026-10-18 14:55 UTC
+
+- Start state: `master` at `e2eb209`, clean. The live `restart_20261018_visible3` stack is running (disarmed, landed) and is not modified by this work. Stand-experiment evidence stays at `/home/hp/uav_ros_experiments/oakd_sensor_rig_20261018/`; visible smoke-test evidence stays in `restart_20261018_visible3/`.
+- Milestones, each committed separately once its offline tests pass:
+  1. Versioned simulation assets: `sim/worlds/sar_walls.sdf` (red target) and `sim/models/x500_lidar_2d_oakd` (x500 + horizontal LiDAR + OAK-D Lite pitched 30° down). The launcher gains an opt-in `--profile sar_oakd` with a run-local `gz_env.sh` and `PX4_SYS_AUTOSTART=4013`. The legacy profile stays the default.
+  2. Target perception: a ROS-free `target_perception.py` (RGB red segmentation, depth mapping, known-radius sphere fit, edge handling, validity) and `target_perception_node.py` publishing a versioned Float64MultiArray with an image timestamp.
+  3. Observation contract `sar_obs_v1`: a shared `sar_observation.py` builder (LiDAR sectors, previous action, EKF body velocity, yaw rate, height, current detection, and a dead-reckoned last-seen memory with expiry). Ground truth lives only in `sar_task.py` (reward and success). The publisher becomes LiDAR-only (no Gazebo pose).
+  4. Episode and control changes: fly to a fixed start pose after takeoff, return to start before landing after success or timeout, sim-time step duration, altitude hold during velocity control, and a world/target consistency check.
+  5. A kinematic stand-in environment that uses the same builder and task code, plus a baseline controller and offline tests.
+  6. PPO: SB3 and CPU torch with pinned gymnasium/numpy; training and evaluation entry points; a short smoke run on the stand-in; comparison with the baseline.
+  7. Preparation for one supervised SITL target-reaching test (gated; not flown without review).

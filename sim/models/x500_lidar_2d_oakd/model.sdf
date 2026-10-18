@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version='1.9'>
+  <model name='x500_lidar_2d_oakd'>
+    <include merge='true'>
+      <uri>x500</uri>
+    </include>
+    <!-- Horizontal 2-D LiDAR: identical to PX4 x500_lidar_2d (keeps PX4 GZBridge's
+         link/link/sensor/lidar_2d_v2/scan subscription and the obstacle data path). -->
+    <include merge='true'>
+      <uri>model://lidar_2d_v2</uri>
+      <pose>.12 0 .26 0 0 0</pose>
+    </include>
+    <joint name="LidarJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>link</child>
+      <pose relative_to="base_link">-.1 0 .26 0 0 0</pose>
+    </joint>
+    <!-- OAK-D Lite: PX4 x500_depth mount (.12 .03 .242) moved 0.05 m forward to clear the
+         LiDAR base, pitched 30 deg nose-down (+pitch tips the optical axis toward -z). -->
+    <include merge='true'>
+      <uri>model://OakD-Lite</uri>
+      <pose>.17 .03 .242 0 0.5235987756 0</pose>
+    </include>
+    <joint name="CameraJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+      <pose relative_to="base_link">0 0 0 0 0 0</pose>
+    </joint>
+  </model>
+</sdf>

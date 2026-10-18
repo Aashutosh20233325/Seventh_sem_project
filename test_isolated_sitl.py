@@ -179,3 +179,56 @@ def test_failed_start_cleanup_refuses_live_px4_child(tmp_path, monkeypatch):
 
     with pytest.raises(isolated_sitl.IsolationError, match="PX4 child is still running"):
         isolated_sitl.cleanup_failed_start(tmp_path)
+
+
+def test_legacy_profile_keeps_original_bridge_and_environment():
+    legacy = isolated_sitl.PROFILES["legacy"]
+
+    assert legacy.bridge_arguments() == [isolated_sitl.BRIDGE_TOPIC]
+    assert legacy.model_instance == isolated_sitl.MODEL_INSTANCE
+    assert "PX4_SYS_AUTOSTART" not in isolated_sitl.px4_environment({})
+    assert isolated_sitl.gz_env_script(legacy) == isolated_sitl.PX4_GZ_ENV.read_bytes()
+
+
+def test_sar_oakd_profile_uses_versioned_assets_and_lidar_airframe():
+    profile = isolated_sitl.PROFILES["sar_oakd"]
+    px4 = isolated_sitl.px4_environment({}, profile)
+    ros = isolated_sitl.ros_environment({}, profile=profile)
+
+    assert px4["PX4_GZ_WORLD"] == "sar_walls"
+    assert px4["PX4_SIM_MODEL"] == "gz_x500_lidar_2d_oakd"
+    assert px4["PX4_SYS_AUTOSTART"] == "4013"
+    assert ros["SAR_UAV_MODEL_NAME"] == "x500_lidar_2d_oakd_1"
+    assert ros["SAR_LIDAR_TOPIC"] == (
+        "/world/sar_walls/model/x500_lidar_2d_oakd_1/link/link/sensor/lidar_2d_v2/scan"
+    )
+    script = isolated_sitl.gz_env_script(profile).decode()
+    assert script.startswith(isolated_sitl.PX4_GZ_ENV.read_text())
+    assert f"export PX4_GZ_MODELS={isolated_sitl.SIM_MODELS}\n" in script
+    assert f"export PX4_GZ_WORLDS={isolated_sitl.SIM_WORLDS}\n" in script
+    assert (isolated_sitl.SIM_WORLDS / "sar_walls.sdf").is_file()
+    assert (isolated_sitl.SIM_MODELS / "x500_lidar_2d_oakd/model.sdf").is_file()
+
+
+def test_sar_oakd_bridge_remaps_global_camera_topics_to_project_names():
+    args = isolated_sitl.PROFILES["sar_oakd"].bridge_arguments()
+    rgb = "/world/sar_walls/model/x500_lidar_2d_oakd_1/link/camera_link/sensor/IMX214"
+
+    assert args[0].startswith(isolated_sitl.PROFILES["sar_oakd"].lidar_topic + "@")
+    assert f"{rgb}/image@sensor_msgs/msg/Image[gz.msgs.Image" in args
+    assert "/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image" in args
+    remaps = args[args.index("--ros-args") + 1:]
+    assert remaps[0::2] == ["-r"] * 4
+    assert set(remaps[1::2]) == {
+        f"{rgb}/image:={isolated_sitl.CAMERA_RGB_TOPIC}",
+        f"{rgb}/camera_info:={isolated_sitl.CAMERA_RGB_INFO_TOPIC}",
+        f"/depth_camera:={isolated_sitl.CAMERA_DEPTH_TOPIC}",
+        f"/camera_info:={isolated_sitl.CAMERA_DEPTH_INFO_TOPIC}",
+    }
+
+
+def test_project_profile_refuses_start_without_versioned_assets(tmp_path, monkeypatch):
+    monkeypatch.setattr(isolated_sitl, "SIM_WORLDS", tmp_path / "missing")
+
+    with pytest.raises(isolated_sitl.IsolationError, match="sar_walls.sdf"):
+        isolated_sitl._check_paths(tmp_path / "run", isolated_sitl.PROFILES["sar_oakd"])

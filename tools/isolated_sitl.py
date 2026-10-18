@@ -50,6 +50,69 @@ BRIDGE_TOPIC = (
 STOP_GRACE_SECONDS = 10.0
 TERM_GRACE_SECONDS = 5.0
 
+# Project-versioned simulation assets (profile "sar_oakd").
+SIM_MODELS = PROJECT / "sim/models"
+SIM_WORLDS = PROJECT / "sim/worlds"
+# ROS names for the camera; the gz depth topics are global ("/depth_camera",
+# "/camera_info"), so the bridge remaps them onto unambiguous project names.
+CAMERA_RGB_TOPIC = "/uav/camera/rgb/image"
+CAMERA_RGB_INFO_TOPIC = "/uav/camera/rgb/camera_info"
+CAMERA_DEPTH_TOPIC = "/uav/camera/depth/image"
+CAMERA_DEPTH_INFO_TOPIC = "/uav/camera/depth/camera_info"
+
+
+class Profile:
+    """Simulation assets and ROS bridge configuration for one launch profile."""
+
+    def __init__(
+        self,
+        name: str,
+        world: str,
+        sim_model: str,
+        autostart: int | None,
+        project_assets: bool,
+        camera: bool,
+    ) -> None:
+        self.name = name
+        self.world = world
+        self.sim_model = sim_model
+        self.autostart = autostart
+        self.project_assets = project_assets
+        self.camera = camera
+        self.model_instance = f"{sim_model.removeprefix('gz_')}_{PX4_INSTANCE}"
+        model_prefix = f"/world/{world}/model/{self.model_instance}"
+        self.lidar_topic = f"{model_prefix}/link/link/sensor/lidar_2d_v2/scan"
+        self.camera_prefix = f"{model_prefix}/link/camera_link/sensor"
+
+    def bridge_arguments(self) -> list[str]:
+        args = [f"{self.lidar_topic}@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan"]
+        if not self.camera:
+            return args
+        rgb = f"{self.camera_prefix}/IMX214"
+        args += [
+            f"{rgb}/image@sensor_msgs/msg/Image[gz.msgs.Image",
+            f"{rgb}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+            "/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image",
+            "/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+            "--ros-args",
+            "-r", f"{rgb}/image:={CAMERA_RGB_TOPIC}",
+            "-r", f"{rgb}/camera_info:={CAMERA_RGB_INFO_TOPIC}",
+            "-r", f"/depth_camera:={CAMERA_DEPTH_TOPIC}",
+            "-r", f"/camera_info:={CAMERA_DEPTH_INFO_TOPIC}",
+        ]
+        return args
+
+
+PROFILES = {
+    # Original stack: PX4 submodule world and stock x500_lidar_2d model.
+    "legacy": Profile("legacy", WORLD, MODEL, None, False, False),
+    # Versioned project world/model: target sphere plus LiDAR and OAK-D Lite.
+    # Airframe 4013 (x500_lidar_2d) only aliases the x500 airframe, so it is
+    # reused explicitly for the combined model.
+    "sar_oakd": Profile("sar_oakd", "sar_walls", "gz_x500_lidar_2d_oakd", 4013, True, True),
+}
+LEGACY = PROFILES["legacy"]
+
 
 class IsolationError(RuntimeError):
     pass
@@ -86,14 +149,14 @@ def px4_command(run_dir: Path) -> list[str]:
     ]
 
 
-def px4_environment(base: dict[str, str]) -> dict[str, str]:
+def px4_environment(base: dict[str, str], profile: Profile = LEGACY) -> dict[str, str]:
     env = dict(base)
     env.update(
         {
             "ROS_DOMAIN_ID": str(DOMAIN_ID),
             "PX4_UXRCE_DDS_PORT": str(XRCE_PORT),
-            "PX4_GZ_WORLD": WORLD,
-            "PX4_SIM_MODEL": MODEL,
+            "PX4_GZ_WORLD": profile.world,
+            "PX4_SIM_MODEL": profile.sim_model,
             # PX4 normally namespaces nonzero instances. The unique ROS
             # domain is the isolation boundary here; clear the namespace so
             # this project's existing /fmu/out subscriptions stay correct.
@@ -101,22 +164,41 @@ def px4_environment(base: dict[str, str]) -> dict[str, str]:
             "GZ_PARTITION": GZ_PARTITION,
         }
     )
+    if profile.autostart is not None:
+        # The combined model has no PX4 airframe file of its own.
+        env["PX4_SYS_AUTOSTART"] = str(profile.autostart)
     return env
 
 
 def ros_environment(
-    base: dict[str, str], domain_id: int = DOMAIN_ID
+    base: dict[str, str], domain_id: int = DOMAIN_ID, profile: Profile = LEGACY
 ) -> dict[str, str]:
     env = dict(base)
     env.update(
         {
             "ROS_DOMAIN_ID": str(domain_id),
             "GZ_PARTITION": GZ_PARTITION,
-            "SAR_UAV_MODEL_NAME": MODEL_INSTANCE,
-            "SAR_LIDAR_TOPIC": BRIDGE_TOPIC.split("@")[0],
+            "SAR_UAV_MODEL_NAME": profile.model_instance,
+            "SAR_LIDAR_TOPIC": profile.lidar_topic,
         }
     )
     return env
+
+
+def gz_env_script(profile: Profile = LEGACY) -> bytes:
+    """PX4's generated gz_env.sh, plus project asset paths for project profiles."""
+    script = PX4_GZ_ENV.read_bytes()
+    if not profile.project_assets:
+        return script
+    override = (
+        "\n# --- uav_ros project assets (tools/isolated_sitl.py profile "
+        f"{profile.name}) ---\n"
+        f"export PX4_GZ_MODELS={shlex.quote(str(SIM_MODELS))}\n"
+        f"export PX4_GZ_WORLDS={shlex.quote(str(SIM_WORLDS))}\n"
+        f"export GZ_SIM_RESOURCE_PATH={shlex.quote(str(SIM_MODELS))}:"
+        f"{shlex.quote(str(SIM_WORLDS))}:$GZ_SIM_RESOURCE_PATH\n"
+    )
+    return script + override.encode()
 
 
 def _proc_start_time(pid: int) -> int | None:
@@ -237,10 +319,16 @@ def _assert_domain_and_partition_unused(env: dict[str, str]) -> None:
         )
 
 
-def _check_paths(run_dir: Path) -> None:
+def _check_paths(run_dir: Path, profile: Profile = LEGACY) -> None:
     if not PX4_BINARY.is_file() or not os.access(PX4_BINARY, os.X_OK):
         raise IsolationError(f"PX4 SITL binary is unavailable: {PX4_BINARY}")
-    for path in (PX4_DATA, PX4_GZ_ENV, XRCE_AGENT, ROS_SETUP, ROS_OVERLAY, ROS2, PYTHON):
+    required = [PX4_DATA, PX4_GZ_ENV, XRCE_AGENT, ROS_SETUP, ROS_OVERLAY, ROS2, PYTHON]
+    if profile.project_assets:
+        required += [
+            SIM_WORLDS / f"{profile.world}.sdf",
+            SIM_MODELS / profile.sim_model.removeprefix("gz_") / "model.sdf",
+        ]
+    for path in required:
         if not path.exists():
             raise IsolationError(f"Required isolated-stack dependency is missing: {path}")
     resolved = run_dir.resolve()
@@ -251,13 +339,13 @@ def _check_paths(run_dir: Path) -> None:
         raise IsolationError(f"Run directory already contains data; refusing overwrite: {run_dir}")
 
 
-def _prepare_run_dir(run_dir: Path) -> None:
+def _prepare_run_dir(run_dir: Path, profile: Profile = LEGACY) -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
     rootfs = run_dir / "px4_rootfs"
     (rootfs / "fs").mkdir(parents=True)
     # PX4's local gz startup script sources ./gz_env.sh from its working dir.
     # Copy the configuration, never link writable PX4 storage to the shared tree.
-    (rootfs / "gz_env.sh").write_bytes(PX4_GZ_ENV.read_bytes())
+    (rootfs / "gz_env.sh").write_bytes(gz_env_script(profile))
     (run_dir / "logs").mkdir()
 
 
@@ -335,14 +423,14 @@ def _verified_record(record: dict[str, Any]) -> bool:
     )
 
 
-def start(run_dir: Path) -> None:
+def start(run_dir: Path, profile: Profile = LEGACY) -> None:
     run_dir = run_dir.resolve()
-    _check_paths(run_dir)
+    _check_paths(run_dir, profile)
     _assert_endpoint_free(XRCE_PORT)
     env_base = sourced_environment()
-    env_ros = ros_environment(env_base)
+    env_ros = ros_environment(env_base, profile=profile)
     _assert_domain_and_partition_unused(env_ros)
-    _prepare_run_dir(run_dir)
+    _prepare_run_dir(run_dir, profile)
 
     manifest: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -353,8 +441,9 @@ def start(run_dir: Path) -> None:
         "ros_domain_id": DOMAIN_ID,
         "xrce_udp_port": XRCE_PORT,
         "gazebo_partition": GZ_PARTITION,
-        "world": WORLD,
-        "model": MODEL,
+        "profile": profile.name,
+        "world": profile.world,
+        "model": profile.sim_model,
         "components": {},
     }
     _write_manifest(run_dir, manifest)
@@ -377,7 +466,7 @@ def start(run_dir: Path) -> None:
             run_dir,
             "px4_gazebo",
             px4_command(run_dir),
-            px4_environment(env_base),
+            px4_environment(env_base, profile),
             run_dir / "px4_rootfs",
         )
         manifest["components"]["px4_gazebo"] = px4
@@ -397,7 +486,7 @@ def start(run_dir: Path) -> None:
                 probe = subprocess.run(
                     ["gz", "topic", "-l"], env=gz_env, capture_output=True, timeout=3
                 )
-                if b"/world/walls/clock" in probe.stdout:
+                if f"/world/{profile.world}/clock".encode() in probe.stdout:
                     break
         else:
             raise IsolationError("Isolated Gazebo world did not publish its clock within 30s")
@@ -405,7 +494,7 @@ def start(run_dir: Path) -> None:
         bridge = _spawn(
             run_dir,
             "lidar_bridge",
-            [str(ROS2), "run", "ros_gz_bridge", "parameter_bridge", BRIDGE_TOPIC],
+            [str(ROS2), "run", "ros_gz_bridge", "parameter_bridge", *profile.bridge_arguments()],
             env_ros,
             run_dir,
         )
@@ -565,10 +654,17 @@ def main(argv: list[str] | None = None) -> int:
         "command", choices=("start", "status", "stop", "cleanup-failed-start")
     )
     parser.add_argument("--run-dir", type=Path, default=RUN_DIR)
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        default="legacy",
+        help="start only: simulation assets (legacy: PX4 walls/x500_lidar_2d; "
+        "sar_oakd: versioned sim/ world with target and LiDAR+OAK-D model)",
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "start":
-            start(args.run_dir)
+            start(args.run_dir, PROFILES[args.profile])
         elif args.command == "status":
             status(args.run_dir)
         elif args.command == "stop":
