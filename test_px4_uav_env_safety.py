@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import sys
 import threading
 import types
@@ -8,6 +9,9 @@ import time
 
 import numpy as np
 import pytest
+
+import sar_observation
+import sar_task
 
 
 def load_environment(monkeypatch):
@@ -44,6 +48,7 @@ def load_environment(monkeypatch):
 
     std_msgs = types.ModuleType("std_msgs.msg")
     std_msgs.Float32MultiArray = type("Float32MultiArray", (), {})
+    std_msgs.Float64MultiArray = type("Float64MultiArray", (), {})
 
     px4_msgs = types.ModuleType("px4_msgs.msg")
     for name in (
@@ -55,6 +60,7 @@ def load_environment(monkeypatch):
         "VehicleAttitude",
         "VehicleLandDetected",
         "VehicleCommandAck",
+        "VehicleOdometry",
         "TimesyncStatus",
     ):
         setattr(px4_msgs, name, type(name, (), {}))
@@ -95,12 +101,18 @@ class FakeNode:
         self.action = np.zeros(2, dtype=np.float32)
         self.phase = "VELOCITY"
         self.observation_counter = 1
-        self.latest_observation = np.zeros(54, dtype=np.float32)
+        self.latest_observation = np.zeros(49, dtype=np.float32)
         self.observation_received_at = time.monotonic()
         self.x = 0.0
         self.y = 0.0
         self.z = -1.0
         self.heading = 0.0
+        self.vx = 0.0
+        self.vy = 0.0
+        self.yaw_rate = 0.0
+        self.odometry_received_at = time.monotonic()
+        self.latest_perception = None
+        self.perception_received_at = None
         self.heading_valid = True
         self.position_valid = True
         self.roll = 0.0
@@ -212,6 +224,9 @@ def make_environment(module):
     env._landing_cleanup_thread = None
     env.current_step = 0
     env.max_steps = 10
+    env.task_config = sar_task.TaskConfig()
+    env.target = sar_task.load_target()
+    env.builder = sar_observation.ObservationBuilder()
     env.previous_action = np.zeros(2, dtype=np.float32)
     env.action_space = SimpleNamespace(
         low=np.array([0.0, -1.0], dtype=np.float32),
@@ -222,7 +237,7 @@ def make_environment(module):
     )
     env._distance_to_target = lambda: 10.0
     env._collision_detected = lambda raw: False
-    env._convert_observation = lambda raw: np.zeros(54, dtype=np.float32)
+    env._convert_observation = lambda raw: np.zeros(sar_observation.DIM, dtype=np.float32)
     return env
 
 
@@ -733,7 +748,7 @@ def test_observation_callback_rejects_non_finite_values(monkeypatch):
     node.latest_observation = None
     node.observation_received_at = None
 
-    message = SimpleNamespace(data=[0.0] * 53 + [float("nan")])
+    message = SimpleNamespace(data=[0.0] * 48 + [float("nan")])
     module.PX4ControllerNode.observation_callback(node, message)
 
     assert node.observation_counter == 0
@@ -743,9 +758,12 @@ def test_observation_callback_rejects_non_finite_values(monkeypatch):
 def test_target_world_position_is_converted_to_px4_ned_for_reward(monkeypatch):
     module = load_environment(monkeypatch)
     env = module.PX4UAVEnv.__new__(module.PX4UAVEnv)
+    env.target = sar_task.load_target()
     env.node = SimpleNamespace(x=-3.0, y=3.0)
 
     assert env._distance_to_target() == pytest.approx(0.0)
+    env.node = SimpleNamespace(x=0.0, y=0.0)
+    assert env._distance_to_target() == pytest.approx(math.hypot(3.0, 3.0))
 
 
 def test_positive_speed_without_progress_gets_no_speed_bonus(monkeypatch):
@@ -1878,3 +1896,141 @@ def test_repeated_status_and_safe_state_calls_send_one_land_command(
     assert len(land_commands) == 1
     assert env._landing_pending is True
     assert node.land_setpoints_released is True
+
+
+# ----------------------------------------------------------------------
+# sar_obs_v1 integration: sensor-only observation, privileged ground truth
+# ----------------------------------------------------------------------
+
+
+def observation_environment(module):
+    env = make_environment(module)
+    env._convert_observation = module.PX4UAVEnv._convert_observation.__get__(env)
+    env._distance_to_target = module.PX4UAVEnv._distance_to_target.__get__(env)
+    env.TAKEOFF_TELEMETRY_MAX_AGE = 1.0
+    env.previous_action = np.array([0.3, -0.1], dtype=np.float32)
+    node = env.node
+    node.x, node.y, node.z, node.heading = 1.0, -0.5, -1.8, math.pi / 2
+    node.vx, node.vy, node.yaw_rate = 0.1, 0.4, 0.05
+    node.latest_perception = {
+        "detected": True, "range_valid": True, "bearing": 0.2,
+        "horizontal_range": 4.0, "image_stamp": 50.0,
+    }
+    node.perception_received_at = time.monotonic()
+    return env
+
+
+def test_changing_ground_truth_target_does_not_change_observation(monkeypatch):
+    module = load_environment(monkeypatch)
+    lidar = np.full(49, 7.5, dtype=np.float32)
+    observations, distances = [], []
+    for target in (sar_task.Target(-3.0, 3.0, 0.055, 0.5), sar_task.Target(8.0, -6.0, 0.055, 0.5)):
+        env = observation_environment(module)
+        env.target = target
+        observations.append(env._convert_observation(lidar))
+        distances.append(env._distance_to_target())
+
+    np.testing.assert_array_equal(observations[0], observations[1])
+    assert distances[0] != pytest.approx(distances[1])
+
+
+def test_converted_observation_follows_contract(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = observation_environment(module)
+
+    obs = env._convert_observation(np.full(49, 7.5, dtype=np.float32))
+
+    assert obs.shape == (sar_observation.DIM,) and obs.dtype == np.float32
+    assert np.all(obs >= sar_observation.LOW) and np.all(obs <= sar_observation.HIGH)
+    assert obs[sar_observation.SLICES["det_now"]][0] == 1.0
+    assert obs[sar_observation.SLICES["est_valid"]][0] == 1.0
+    assert obs[sar_observation.SLICES["prev_speed"]][0] == pytest.approx(0.3)
+    assert obs[sar_observation.SLICES["vel_forward"]][0] == pytest.approx(0.4 / 1.5)
+
+
+@pytest.mark.parametrize("stale", ["position", "odometry", "clock"])
+def test_observation_refuses_stale_or_missing_onboard_state(monkeypatch, stale):
+    module = load_environment(monkeypatch)
+    env = observation_environment(module)
+    if stale == "position":
+        env.node.position_received_at = time.monotonic() - 5.0
+    elif stale == "odometry":
+        env.node.odometry_received_at = None
+    else:
+        env.node.px4_sim_time_us = None
+
+    with pytest.raises(ValueError):
+        env._convert_observation(np.full(49, 7.5, dtype=np.float32))
+
+
+def test_stale_perception_is_not_reported_as_current_detection(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = observation_environment(module)
+    env.node.perception_received_at = time.monotonic() - 5.0
+
+    obs = env._convert_observation(np.full(49, 7.5, dtype=np.float32))
+
+    assert obs[sar_observation.SLICES["det_now"]][0] == 0.0
+    assert obs[sar_observation.SLICES["est_valid"]][0] == 0.0
+
+
+def test_perception_callback_decodes_and_rejects_old_or_malformed(monkeypatch):
+    module = load_environment(monkeypatch)
+    import target_perception as tp
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.condition = threading.Condition()
+    node.latest_perception = None
+    node.perception_received_at = None
+    good = tp.encode(tp.Detection(True, tp.STATUS_DETECTED, True, 0.1, -0.3, 4.0, 4.4, 3.9, 1.0, 900),
+                     20.0, 20.0, 25.0)
+
+    module.PX4ControllerNode.perception_callback(node, SimpleNamespace(data=good))
+    assert node.latest_perception["horizontal_range"] == 4.0
+    received = node.perception_received_at
+    older = list(good)
+    older[1] = 19.0
+    module.PX4ControllerNode.perception_callback(node, SimpleNamespace(data=older))
+    module.PX4ControllerNode.perception_callback(node, SimpleNamespace(data=good[:5]))
+    assert node.latest_perception["image_stamp"] == 20.0
+    assert node.perception_received_at == received
+
+
+def test_odometry_yaw_rate_is_converted_from_frd_to_flu(monkeypatch):
+    module = load_environment(monkeypatch)
+    node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
+    node.condition = threading.Condition()
+    module.PX4ControllerNode.odometry_callback(node, SimpleNamespace(angular_velocity=[0.0, 0.0, 0.3]))
+    assert node.yaw_rate == pytest.approx(-0.3)
+
+
+def test_success_step_terminates_with_privileged_info_only(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env._distance_to_target = lambda: 0.5
+    safe_calls = []
+    env._enter_safe_state = lambda: safe_calls.append(True)
+
+    obs, reward, terminated, truncated, info = env._step_after_action(
+        np.array([0.2, 0.0], dtype=np.float32), 0.9, 0)
+
+    assert terminated and not truncated and info["reason"] == "success"
+    assert reward == pytest.approx(-0.1 + 0.4 + 100.0)
+    assert safe_calls == [True]
+    assert set(info["privileged"]) == {"distance_to_target", "target_ned", "x", "y", "z"}
+    assert "distance_to_target" not in {k for k in info if k != "privileged"}
+
+
+def test_action_turn_sign_is_ned_clockwise_and_speed_follows_heading(monkeypatch):
+    module = load_environment(monkeypatch)
+    published = []
+    node = SimpleNamespace(
+        action=np.array([1.0, 1.0]), heading=math.pi / 2, heading_valid=True,
+        timestamp=lambda: 1, setpoint_pub=SimpleNamespace(publish=published.append),
+    )
+
+    module.PX4ControllerNode.publish_velocity_setpoint(node)
+
+    # +turn = +NED yaw rate = clockwise (right); forward flies along the heading (east).
+    assert published[0].yawspeed == pytest.approx(0.5)
+    assert published[0].velocity[0] == pytest.approx(0.0, abs=1e-9)
+    assert published[0].velocity[1] == pytest.approx(1.0)

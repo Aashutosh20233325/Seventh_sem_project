@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import threading
 import time
@@ -16,7 +17,7 @@ from rclpy.qos import (
     DurabilityPolicy,
 )
 
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Float64MultiArray
 
 from px4_msgs.msg import (
     OffboardControlMode,
@@ -27,11 +28,18 @@ from px4_msgs.msg import (
     VehicleAttitude,
     VehicleLandDetected,
     VehicleCommandAck,
+    VehicleOdometry,
     TimesyncStatus,
 )
 
+import sar_observation
+import sar_task
+import target_perception
+
 
 VEHICLE_COMMAND_ACK_TOPIC = "/fmu/out/vehicle_command_ack_v1"
+LIDAR_SECTORS_TOPIC = "/uav/lidar_sectors"
+TARGET_PERCEPTION_TOPIC = "/uav/target_perception"
 
 
 class PX4ControllerNode(Node):
@@ -85,9 +93,23 @@ class PX4ControllerNode(Node):
 
         self.obs_sub = self.create_subscription(
             Float32MultiArray,
-            "/uav/observation",
+            LIDAR_SECTORS_TOPIC,
             self.observation_callback,
             10,
+        )
+
+        self.perception_sub = self.create_subscription(
+            Float64MultiArray,
+            TARGET_PERCEPTION_TOPIC,
+            self.perception_callback,
+            10,
+        )
+
+        self.odometry_sub = self.create_subscription(
+            VehicleOdometry,
+            "/fmu/out/vehicle_odometry",
+            self.odometry_callback,
+            qos,
         )
 
         self.position_sub = self.create_subscription(
@@ -143,10 +165,16 @@ class PX4ControllerNode(Node):
         self.y = 0.0
         self.z = 0.0
         self.heading = 0.0
+        self.vx = 0.0
+        self.vy = 0.0
         self.heading_valid = False
         self.position_valid = False
         self.position_received_at = None
         self.observation_received_at = None
+        self.yaw_rate = 0.0
+        self.odometry_received_at = None
+        self.latest_perception = None
+        self.perception_received_at = None
         self.px4_sim_time_us = None
         self.px4_sim_time_received_at = None
 
@@ -206,7 +234,10 @@ class PX4ControllerNode(Node):
             dtype=np.float32,
         )
 
-        if len(data) != 54 or not np.all(np.isfinite(data)):
+        if (
+            len(data) != sar_observation.LIDAR_SECTORS
+            or not np.all(np.isfinite(data))
+        ):
             return
 
         with self.condition:
@@ -224,15 +255,43 @@ class PX4ControllerNode(Node):
             self.y = float(msg.y)
             self.z = float(msg.z)
             self.heading = float(msg.heading)
+            self.vx = float(msg.vx)
+            self.vy = float(msg.vy)
             self.heading_valid = bool(
                 msg.heading_good_for_control and np.isfinite(self.heading)
             )
             self.position_valid = bool(
                 msg.xy_valid
                 and msg.z_valid
-                and np.all(np.isfinite([self.x, self.y, self.z, self.heading]))
+                and msg.v_xy_valid
+                and np.all(np.isfinite(
+                    [self.x, self.y, self.z, self.heading, self.vx, self.vy]
+                ))
             )
             self.position_received_at = time.monotonic()
+            self.condition.notify_all()
+
+    def perception_callback(self, msg):
+        decoded = target_perception.decode(msg.data)
+        if decoded is None:
+            return
+        with self.condition:
+            previous = self.latest_perception
+            # Out-of-order or repeated frames must never look newer than they are.
+            if previous is not None and decoded["image_stamp"] <= previous["image_stamp"]:
+                return
+            self.latest_perception = decoded
+            self.perception_received_at = time.monotonic()
+            self.condition.notify_all()
+
+    def odometry_callback(self, msg):
+        # VehicleOdometry angular velocity is body FRD; the policy uses FLU (+CCW).
+        yaw_rate = -float(msg.angular_velocity[2])
+        if not math.isfinite(yaw_rate):
+            return
+        with self.condition:
+            self.yaw_rate = yaw_rate
+            self.odometry_received_at = time.monotonic()
             self.condition.notify_all()
 
     def status_callback(self, msg):
@@ -646,15 +705,11 @@ class PX4UAVEnv(gym.Env):
         [speed, turn]
 
     Observation:
-        49 LiDAR distances
-        target_detected
-        target_distance
-        target_angle
-        previous_speed
-        previous_turn
-
-    Total observation size:
-        54
+        sar_obs_v1 (65 values; see sar_observation.FIELDS and
+        docs/OBSERVATION_CONTRACT.md). It is built only from LiDAR sectors,
+        the previous action, PX4 EKF estimates, and sensor-derived target
+        perception. Simulator ground truth (sar_task) is used only for
+        reward, success, and the ``info["privileged"]`` debugging values.
     """
 
     metadata = {
@@ -677,11 +732,10 @@ class PX4UAVEnv(gym.Env):
     TAKEOFF_STATUS_UPDATE_TIMEOUT = 2.0
     TAKEOFF_CLOCK_STALL_TIMEOUT = 5.0
     OBSERVATION_MAX_AGE = 1.0
-
-    # The target in walls.sdf is Gazebo ENU (x=3 east, y=-3 south).
-    # PX4 local position uses NED, so the same target is x=-3 north, y=3 east.
-    TARGET_X = -3.0
-    TARGET_Y = 3.0
+    # Wall-clock receipt age after which a perception message is not current.
+    # The RGB camera measured ~2 Hz wall under software rendering.
+    PERCEPTION_MAX_AGE = 1.5
+    TARGET_MEMORY_EXPIRY = 8.0          # s of simulation time
 
     def __init__(self):
 
@@ -704,17 +758,23 @@ class PX4UAVEnv(gym.Env):
         )
 
         # --------------------------------------------------
-        # New 54-D normalized observation
+        # sar_obs_v1 observation; privileged task ground truth
         # --------------------------------------------------
 
         self.observation_space = spaces.Box(
-            low=-1.0,
-            high=1.0,
-            shape=(54,),
+            low=sar_observation.LOW,
+            high=sar_observation.HIGH,
             dtype=np.float32,
         )
+        self.task_config = sar_task.TaskConfig()
+        # The versioned world SDF is the single source of target ground truth.
+        self.target = sar_task.load_target()
+        self.builder = sar_observation.ObservationBuilder(
+            memory_expiry_s=self.TARGET_MEMORY_EXPIRY,
+            perception_max_age_s=self.PERCEPTION_MAX_AGE,
+        )
 
-        self.max_steps = 1000
+        self.max_steps = self.task_config.max_steps
         self.current_step = 0
         self._episode_active = False
         self._landing_pending = False
@@ -754,67 +814,48 @@ class PX4UAVEnv(gym.Env):
     # ======================================================
 
     def _convert_observation(self, raw):
-
-        raw = np.asarray(
-            raw,
-            dtype=np.float32,
-        )
-        if raw.shape != (54,) or not np.all(np.isfinite(raw)):
-            raise ValueError("Observation must contain 54 finite values.")
-
-        # First 49:
-        # raw LiDAR meters [0, 30]
-        lidar = np.clip(
-            raw[:49] / 30.0,
-            0.0,
-            1.0,
-        )
-
-        target_detected = np.array(
-            [np.clip(raw[49], 0.0, 1.0)],
-            dtype=np.float32,
-        )
-
-        target_distance = np.array(
-            [
-                np.clip(
-                    raw[50] / 30.0,
-                    0.0,
-                    1.0,
-                )
-            ],
-            dtype=np.float32,
-        )
-
-        target_angle = np.array(
-            [
-                np.clip(
-                    raw[51] / math.pi,
-                    -1.0,
-                    1.0,
-                )
-            ],
-            dtype=np.float32,
+        """Build the sar_obs_v1 policy observation from raw LiDAR sectors and fresh onboard state."""
+        raw = np.asarray(raw, dtype=np.float64)
+        node = self.node
+        with node.condition:
+            now = time.monotonic()
+            position_fresh = (
+                node.position_received_at is not None
+                and now - node.position_received_at <= self.TAKEOFF_TELEMETRY_MAX_AGE
+            )
+            odometry_fresh = (
+                node.odometry_received_at is not None
+                and now - node.odometry_received_at <= self.TAKEOFF_TELEMETRY_MAX_AGE
+            )
+            if not position_fresh or not node.position_valid:
+                raise ValueError("Observation needs fresh, valid PX4 local position.")
+            if not odometry_fresh:
+                raise ValueError("Observation needs fresh PX4 odometry (yaw rate).")
+            if node.px4_sim_time_us is None:
+                raise ValueError("Observation needs the reconstructed PX4 simulation clock.")
+            ego = sar_observation.EgoState(
+                x=node.x, y=node.y, z=node.z, vx=node.vx, vy=node.vy,
+                heading=node.heading, yaw_rate=node.yaw_rate,
+            )
+            perception = node.latest_perception
+            perception_age = (
+                None if node.perception_received_at is None
+                else now - node.perception_received_at
+            )
+            now_s = node.px4_sim_time_us / 1_000_000
+        return self.builder.build(
+            raw, self.previous_action, ego, perception, perception_age, now_s
         )
 
-        previous_action = np.asarray(
-            self.previous_action,
-            dtype=np.float32,
-        )
-
-        observation = np.concatenate(
-            [
-                lidar,
-                target_detected,
-                target_distance,
-                target_angle,
-                previous_action,
-            ]
-        )
-
-        return observation.astype(
-            np.float32
-        )
+    def _privileged_info(self):
+        """Simulator ground truth for evaluation and debugging only; never part of the observation."""
+        return {
+            "distance_to_target": self._distance_to_target(),
+            "target_ned": (self.target.x_ned, self.target.y_ned),
+            "x": self.node.x,
+            "y": self.node.y,
+            "z": self.node.z,
+        }
 
     # ======================================================
     # Wait for observation
@@ -1235,11 +1276,7 @@ class PX4UAVEnv(gym.Env):
     # ======================================================
 
     def _distance_to_target(self):
-
-        return math.hypot(
-            self.TARGET_X - self.node.x,
-            self.TARGET_Y - self.node.y,
-        )
+        return sar_task.horizontal_distance(self.node.x, self.node.y, self.target)
 
     def _collision_detected(
         self,
@@ -1373,6 +1410,7 @@ class PX4UAVEnv(gym.Env):
 
             self._takeoff()
 
+            self.builder.reset()
             raw_observation = (
                 self._wait_for_observation()
             )
@@ -1381,13 +1419,9 @@ class PX4UAVEnv(gym.Env):
             )
 
             info = {
-                "distance_to_target":
-                    self._distance_to_target(),
-                "x": self.node.x,
-                "y": self.node.y,
-                "z": self.node.z,
-                "target_detected":
-                    bool(raw_observation[49]),
+                "observation_version": sar_observation.VERSION,
+                "target_detected": bool(observation[sar_observation.SLICES["det_now"]][0]),
+                "privileged": self._privileged_info(),
             }
 
             self._episode_active = True
@@ -1464,93 +1498,41 @@ class PX4UAVEnv(gym.Env):
 
         self.current_step += 1
 
-        new_distance = (
-            self._distance_to_target()
+        new_distance = self._distance_to_target()
+        collision = self._collision_detected(raw_observation)
+        outcome = sar_task.step_outcome(
+            old_distance,
+            new_distance,
+            collision,
+            self.current_step,
+            dataclasses.replace(self.task_config, max_steps=self.max_steps),
         )
 
-        collision = (
-            self._collision_detected(
-                raw_observation
-            )
-        )
+        self.previous_action = action.copy()
+        observation = self._convert_observation(raw_observation)
 
-        reached = (
-            new_distance <= 0.75
-        )
-
-        # Same basic reward structure as old environment.
-        reward = -0.1
-
-        reward += (
-            old_distance
-            - new_distance
-        )
-
-        if collision:
-            reward -= 100.0
-
-        if reached:
-            reward += 100.0
-
-        terminated = (
-            collision
-            or reached
-        )
-
-        truncated = (
-            self.current_step
-            >= self.max_steps
-        )
-
-        if terminated or truncated:
+        if outcome.terminated or outcome.truncated:
             self._enter_safe_state()
 
-        self.previous_action = (
-            action.copy()
-        )
-
-        observation = (
-            self._convert_observation(
-                raw_observation
-            )
-        )
-
         info = {
-            "distance_to_target":
-                new_distance,
-            "collision":
-                collision,
-            "reached_target":
-                reached,
-            "min_lidar":
-                float(
-                    np.min(
-                        raw_observation[:49]
-                    )
-                ),
-            "target_detected":
-                bool(
-                    raw_observation[49]
-                ),
-            "x":
-                self.node.x,
-            "y":
-                self.node.y,
-            "z":
-                self.node.z,
-            "roll":
-                self.node.roll,
-            "pitch":
-                self.node.pitch,
-            "step":
-                self.current_step,
+            "observation_version": sar_observation.VERSION,
+            "reason": outcome.reason,
+            "collision": collision,
+            "reached_target": outcome.reason == "success",
+            "min_lidar": float(np.min(np.asarray(raw_observation)[:sar_observation.LIDAR_SECTORS])),
+            "target_detected": bool(observation[sar_observation.SLICES["det_now"]][0]),
+            "target_estimate_valid": bool(observation[sar_observation.SLICES["est_valid"]][0]),
+            "roll": self.node.roll,
+            "pitch": self.node.pitch,
+            "step": self.current_step,
+            "privileged": self._privileged_info(),
         }
 
         return (
             observation,
-            float(reward),
-            terminated,
-            truncated,
+            float(outcome.reward),
+            outcome.terminated,
+            outcome.truncated,
             info,
         )
 

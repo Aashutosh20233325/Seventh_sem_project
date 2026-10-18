@@ -75,75 +75,49 @@ class Publisher:
         self.messages.append(message)
 
 
-def test_publisher_target_detection_uses_sensor_relative_angle(publisher_module):
-    publisher = publisher_module.ObservationPublisher.__new__(
-        publisher_module.ObservationPublisher
-    )
-    scan = SimpleNamespace(
-        angle_min=-math.pi / 2,
-        angle_max=math.pi / 2,
-        angle_increment=math.pi / 180,
-        range_min=0.1,
-        range_max=30.0,
-        ranges=[float("inf")] * 181,
-    )
-    # Vehicle faces +Y in Gazebo ENU; target is directly forward.
-    scan.ranges[90] = 4.5
-    pose = (0.0, 0.0, math.pi / 2, 0.0, 5.0)
-
-    assert publisher.get_target_values(scan, pose) == pytest.approx(
-        (1.0, 4.5, 0.0)
-    )
-
-
-def test_pose_callback_tracks_gazebo_uav_and_target(publisher_module):
-    publisher = publisher_module.ObservationPublisher.__new__(
-        publisher_module.ObservationPublisher
-    )
+def make_publisher(module, scan, received_ago):
+    publisher = module.ObservationPublisher.__new__(module.ObservationPublisher)
     publisher._input_lock = threading.Lock()
-    yaw = math.pi / 3
-    uav = SimpleNamespace(
-        name="x500_lidar_2d_0",
-        position=SimpleNamespace(x=1.0, y=2.0),
-        orientation=SimpleNamespace(
-            x=0.0,
-            y=0.0,
-            z=math.sin(yaw / 2),
-            w=math.cos(yaw / 2),
-        ),
-    )
-    target = SimpleNamespace(
-        name="target",
-        position=SimpleNamespace(x=4.0, y=-2.0),
-    )
-
-    publisher.pose_callback(SimpleNamespace(pose=[target, uav]))
-
-    assert publisher.pose_valid
-    assert publisher.uav_x == 1.0
-    assert publisher.uav_y == 2.0
-    assert publisher.uav_yaw == pytest.approx(yaw)
-    assert publisher.target_x == 4.0
-    assert publisher.target_y == -2.0
-
-
-def test_publisher_does_not_republish_when_a_source_is_stale(publisher_module):
-    publisher = publisher_module.ObservationPublisher.__new__(
-        publisher_module.ObservationPublisher
-    )
-    publisher._input_lock = threading.Lock()
-    now = time.monotonic()
-    publisher.scan_received_at = now - 1.0
-    publisher.pose_received_at = now
-    publisher.position_received_at = now
+    publisher.scan = scan
     publisher.scan_valid = True
-    publisher.pose_valid = True
-    publisher.position_valid = True
-    publisher.scan = object()
-    publisher.uav_x = publisher.uav_y = publisher.uav_yaw = 0.0
-    publisher.target_x = publisher.target_y = 1.0
+    publisher.scan_received_at = time.monotonic() - received_ago
     publisher.publisher = Publisher()
+    publisher.get_logger = lambda: SimpleNamespace(error=lambda _msg: None)
+    return publisher
+
+
+def scan_with(ranges):
+    return SimpleNamespace(
+        angle_min=-2.356195, angle_max=2.356195,
+        angle_increment=4.71239 / (len(ranges) - 1),
+        range_min=0.1, range_max=30.0, ranges=ranges,
+    )
+
+
+def test_publishes_49_finite_sectors_with_non_finite_rays_as_max_range(publisher_module):
+    ranges = [float("inf")] * 1080
+    ranges[540] = 2.5
+    ranges[0] = float("nan")
+    publisher = make_publisher(publisher_module, scan_with(ranges), 0.05)
+    publisher_module.Float32MultiArray = lambda: SimpleNamespace(data=None)
+
+    publisher.publish_observation()
+
+    (msg,) = publisher.publisher.messages
+    assert len(msg.data) == 49 and all(math.isfinite(v) for v in msg.data)
+    assert msg.data[24] == pytest.approx(2.5)
+    assert msg.data[0] == pytest.approx(30.0)
+
+
+def test_publisher_does_not_republish_when_scan_is_stale(publisher_module):
+    publisher = make_publisher(publisher_module, scan_with([5.0] * 1080), 1.0)
 
     publisher.publish_observation()
 
     assert publisher.publisher.messages == []
+
+
+def test_lidar_publisher_has_no_ground_truth_access():
+    source = Path(__file__).with_name("observation_publisher.py").read_text()
+    for forbidden in ("gz.", "pose/info", "Pose_V", "target_x", "TARGET"):
+        assert forbidden not in source

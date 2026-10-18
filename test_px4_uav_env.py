@@ -33,12 +33,13 @@ def main():
                 info,
             ) = env.step(action)
 
+            truth = info["privileged"]
             print(
                 f"step={step:02d} "
                 f"reward={reward:.3f} "
-                f"x={info['x']:.3f} "
-                f"y={info['y']:.3f} "
-                f"z={info['z']:.3f} "
+                f"x={truth['x']:.3f} "
+                f"y={truth['y']:.3f} "
+                f"z={truth['z']:.3f} "
                 f"target_detected={info['target_detected']} "
                 f"collision={info['collision']}"
             )

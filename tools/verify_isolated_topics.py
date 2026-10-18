@@ -57,7 +57,7 @@ class TopicProbe(Node):
         )
         self.create_subscription(
             Float32MultiArray,
-            "/uav/observation",
+            "/uav/lidar_sectors",
             lambda msg: self._record("observation", msg),
             10,
         )
@@ -122,9 +122,9 @@ def validate(
     )
     if not scan_metadata_valid:
         errors.append("LiDAR scan metadata is invalid or contains NaN beams")
-    if len(observation.data) != 54 or not _finite(list(observation.data)):
+    if len(observation.data) != 49 or not _finite(list(observation.data)):
         errors.append(
-            f"observation must contain 54 finite values; got {len(observation.data)}"
+            f"LiDAR sectors must contain 49 finite values; got {len(observation.data)}"
         )
 
     minimum_counts = {"status": 2, "land": 2, "position": 2, "scan": 3, "observation": 3}
