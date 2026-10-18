@@ -102,6 +102,15 @@ class Profile:
         ]
         return args
 
+    def ros_consumers(self) -> list[tuple[str, list[str]]]:
+        """Project ROS nodes started after the bridge, as (component name, command)."""
+        consumers = [("observation_publisher", [str(PYTHON), str(PROJECT / "observation_publisher.py")])]
+        if self.camera:
+            consumers.append(
+                ("target_perception", [str(PYTHON), str(PROJECT / "target_perception_node.py")])
+            )
+        return consumers
+
 
 PROFILES = {
     # Original stack: PX4 submodule world and stock x500_lidar_2d model.
@@ -182,6 +191,15 @@ def ros_environment(
             "SAR_LIDAR_TOPIC": profile.lidar_topic,
         }
     )
+    if profile.camera:
+        env.update(
+            {
+                "SAR_CAMERA_RGB_TOPIC": CAMERA_RGB_TOPIC,
+                "SAR_CAMERA_RGB_INFO_TOPIC": CAMERA_RGB_INFO_TOPIC,
+                "SAR_CAMERA_DEPTH_TOPIC": CAMERA_DEPTH_TOPIC,
+                "SAR_CAMERA_DEPTH_INFO_TOPIC": CAMERA_DEPTH_INFO_TOPIC,
+            }
+        )
     return env
 
 
@@ -504,15 +522,9 @@ def start(run_dir: Path, profile: Profile = LEGACY) -> None:
         if _proc_start_time(bridge["child_pid"]) != bridge["child_start_time"]:
             raise IsolationError("Isolated LiDAR bridge exited during startup; see its log")
 
-        publisher = _spawn(
-            run_dir,
-            "observation_publisher",
-            [str(PYTHON), str(PROJECT / "observation_publisher.py")],
-            env_ros,
-            run_dir,
-        )
-        manifest["components"]["observation_publisher"] = publisher
-        _write_manifest(run_dir, manifest)
+        for name, command in profile.ros_consumers():
+            manifest["components"][name] = _spawn(run_dir, name, command, env_ros, run_dir)
+            _write_manifest(run_dir, manifest)
         print(f"Isolated stack started. Ownership manifest: {run_dir / MANIFEST}")
         print(f"PX4/Gazebo log: {px4['log']}")
     except Exception as exc:

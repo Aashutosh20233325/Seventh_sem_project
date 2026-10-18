@@ -232,3 +232,15 @@ def test_project_profile_refuses_start_without_versioned_assets(tmp_path, monkey
 
     with pytest.raises(isolated_sitl.IsolationError, match="sar_walls.sdf"):
         isolated_sitl._check_paths(tmp_path / "run", isolated_sitl.PROFILES["sar_oakd"])
+
+
+def test_ros_consumers_add_perception_only_for_camera_profile():
+    legacy = [name for name, _ in isolated_sitl.PROFILES["legacy"].ros_consumers()]
+    camera = dict(isolated_sitl.PROFILES["sar_oakd"].ros_consumers())
+
+    assert legacy == ["observation_publisher"]
+    assert list(camera) == ["observation_publisher", "target_perception"]
+    assert camera["target_perception"][-1].endswith("target_perception_node.py")
+    ros = isolated_sitl.ros_environment({}, profile=isolated_sitl.PROFILES["sar_oakd"])
+    assert ros["SAR_CAMERA_DEPTH_TOPIC"] == isolated_sitl.CAMERA_DEPTH_TOPIC
+    assert "SAR_CAMERA_RGB_TOPIC" not in isolated_sitl.ros_environment({})
