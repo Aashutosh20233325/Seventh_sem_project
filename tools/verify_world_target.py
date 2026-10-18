@@ -20,10 +20,16 @@ import sar_task  # noqa: E402
 TOLERANCE_M = 0.05
 
 
+def first_message(text: str) -> str:
+    """`gz topic -e -n 1` can print more than one message; keep only the first Pose_V."""
+    starts = [i for i in range(len(text)) if text.startswith("header {", i) and (i == 0 or text[i - 1] == "\n")]
+    return text[starts[0]:starts[1]] if len(starts) > 1 else text
+
+
 def parse_pose_info(text: str, name: str = "target") -> list[tuple[float, float, float]]:
-    """Positions of every pose block named ``name`` in `gz topic -e` Pose_V text output."""
+    """Positions of every pose block named ``name`` in the first Pose_V of `gz topic -e` output."""
     found = []
-    for block in text.split("pose {")[1:]:
+    for block in first_message(text).split("pose {")[1:]:
         if not re.search(rf'name: "{re.escape(name)}"', block):
             continue
         position = re.search(r"position \{([^}]*)\}", block)

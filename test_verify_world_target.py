@@ -36,3 +36,10 @@ def test_moved_missing_or_duplicate_target_fails():
 
 def test_zero_fields_omitted_by_protobuf_parse_as_zero():
     assert vwt.parse_pose_info('pose {\n  name: "target"\n  position {\n    y: -3\n  }\n}') == [(0.0, -3.0, 0.0)]
+
+
+def test_only_the_first_printed_message_is_used():
+    one = "header {\n  stamp {\n    sec: 1\n  }\n}\n" + POSE_TEXT
+    two = one + one.replace("sec: 1", "sec: 2")
+    assert vwt.parse_pose_info(two) == [(3.0, -3.0, 0.055)]
+    assert vwt.check(vwt.parse_pose_info(two), sar_task.load_target()) == []

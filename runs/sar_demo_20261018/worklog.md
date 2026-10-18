@@ -229,3 +229,31 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 **Offline validation:** the real `PX4UAVEnv`, `target_perception_node`, and LiDAR publisher were constructed with real rclpy in an empty ROS domain (49). Subscriptions and publishers match the PX4 DDS topic names.
 
 **Next step:** the gated supervised SITL test procedure is in `RUNBOOK_ISOLATED.md`; it has not been run.
+
+## Supervised target-reaching SITL attempt (sar_oakd): stopped at readiness gates, no flight — 2026-10-18
+
+- **Approved:** exactly one experiment. Start state: `master` at `27a70b4`, clean.
+- **Release:**
+  - Shutdown gate PASS at 16:15:23 (disarmed, `nav_state=14`, landed/at_rest/ground_contact true).
+  - `isolated_sitl.py stop --run-dir .../restart_20261018_visible3` PASS; all manifest processes exited. Its recorder (PID 41334) was stopped with SIGINT.
+  - A leftover from this session was found and stopped: the paused, sensorless model load-test Gazebo server (PID 52093; partition `sar_loadtest_52088`; config in a temporary folder), running since milestone 1 at about 14% CPU. It was stopped with SIGINT to its own process group.
+- **Start:** 16:16:22–16:16:37 UTC, `isolated_sitl.py start --profile sar_oakd --run-dir runs/sar_demo_20261018/restart_20261018_oakd1`.
+  - PX4 used `SYS_AUTOSTART 4013` (from the environment), world `sar_walls` from `sim/`, model `x500_lidar_2d_oakd_1`, and the GUI.
+  - All 5 manifest components were alive. Camera topics were remapped onto `/uav/camera/*`.
+  - Recorder: `logs/telemetry_full.jsonl`. ULog: `px4_rootfs/fs/log/2026-10-18/16_16_42.ulg`.
+- **Gate results** (`logs/gate_*.txt`, `logs/cpu_snapshot.txt`):
+  - **Simulation speed FAIL.** Gazebo `/stats` reports RTF 0.023, steady across six samples from 16:17:39 to 16:17:44. The true simulation rate from sensor stamps is **0.157** (camera image stamps over 105 s wall) to **0.189** (local-position stamp clock over 139 s wall). Gazebo `/stats` under-reports under this load. Both are below the required 0.35.
+  - **Load:** the Gazebo server was at 369% CPU and the GUI at 208%; the GPU was idle (software rendering). PX4's server config also loads `GstCameraSystem`, which attached a GStreamer pipeline to the OAK-D RGB camera (GLib `GstNvAutoGp` message in `px4_gazebo.log`).
+  - **Topic probe FAIL**, as a consequence of the slow simulation: status 2.3 s and land detection 5.3 s stale against the 2 s / 4 s probe limits. The latest status was disarmed, `nav_state=4`, `preflight=true`, no failsafe, GCS connected.
+  - **World target:** the first run reported a false FAIL ("found 2"). `gz topic -e -n 1` occasionally prints two messages; the gate tool now parses only the first message, and the live check then passed 5/5. The target is at ENU (3, −3, 0.055), matching `sim/worlds/sar_walls.sdf`.
+  - **Camera and perception, on the ground only:**
+
+| Topic | Wall rate |
+|---|---|
+| `/uav/camera/rgb/image` | 1.8–3.1 Hz |
+| `/uav/camera/depth/image` | 2.2–4.0 Hz |
+| `/uav/target_perception` | 1.8–3.0 Hz (a message for every RGB frame) |
+| `/uav/lidar_sectors` | 10 Hz |
+
+    Perception processing took about 6 ms per frame. `detected=0` and status 1 (no target), as expected with the target about 45° right of the spawn heading. The pipeline is publishing and the data is fresh, but no detection was exercised live.
+- **Outcome:** no flight command was sent and the vehicle was never armed. There was no retry. The stack was left running, disarmed and landed.
