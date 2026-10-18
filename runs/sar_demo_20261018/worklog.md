@@ -69,6 +69,7 @@ Source/configuration inspection established:
 
 ## Final offline review and current read-only state — 2026-10-18
 
+- The isolated validation workflow and code changes are committed as `25ec608` (`Add isolated PX4 SITL validation workflow`).
 - An independent review identified a stale command-target telemetry gap. `send_command()` now refuses Offboard/arm commands unless a `VehicleStatus` sample is no older than 1 second, in addition to refusing commands before any PX4 system ID has been observed. `_takeoff()` allows up to the existing bounded 2-second status replacement interval before requesting Offboard. The best-effort `NAV_LAND` path may use a previously observed system ID when status is stale, so loss of a status update does not suppress the safety landing request; landing remains unconfirmed until fresh landed-and-disarmed telemetry arrives. Regression tests cover stale command refusal, known-ID best-effort landing, and stale-status safe-state behavior.
 - Latest full offline run: **91 passed in 6.82 s**. Python compilation and `git diff --check` passed.
 - Latest 8-second read-only probe passed topic freshness/shape checks: system ID 2, disarmed (`arming_state=1`), nav state 4, `failsafe=false`; `landed=true`, `at_rest=true`, `ground_contact=true`; local NED position `(0.001, 0.035, -0.050)` valid; `heading_good_for_control=false`, `dist_bottom_valid=false`; 1080 LiDAR beams (805 finite), exactly 54 finite observation values. PX4 still reports `preflight=false` and `gcs_connection_lost=true`. No flight command was issued.
