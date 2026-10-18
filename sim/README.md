@@ -25,4 +25,6 @@ These files replace the uncommitted target edit in the PX4 gz-models submodule. 
 
 - The bridge remaps the camera topics to `/uav/camera/{rgb,depth}/{image,camera_info}`.
 - Under this WSL host's software rendering (Mesa llvmpipe), the stand experiment measured RGB at about 8 Hz sim and depth at about 28 Hz sim. See `/home/hp/uav_ros_experiments/oakd_sensor_rig_20261018/RESULTS.md`.
-- Camera rendering competes with the PX4 simulation for CPU.
+- Camera rendering competes with the PX4 simulation for CPU when rendering in software.
+- The `sar_oakd` profile therefore selects Mesa D3D12 on the NVIDIA adapter. Measured simulation rate rose from about 0.16–0.24 (llvmpipe) to about 0.37–0.42, RGB 7 Hz wall, depth 8 Hz wall.
+- `--software-rendering` reverts to llvmpipe.

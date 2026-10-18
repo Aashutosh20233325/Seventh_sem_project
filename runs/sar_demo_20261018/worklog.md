@@ -299,3 +299,40 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - The GUI screenshot does not show the temporarily moved static sphere; the GUI scene does not appear to refresh a static-model `set_pose`, while the server-side camera did render it.
 - **Root cause and recommendation:** the Gazebo server and GUI each run 16 Mesa llvmpipe threads. `/dev/dri` is absent; only `/dev/dxg` exists. `libd3d12.so` resolves through `ldconfig` but is never loaded, so Mesa's D3D12 (GPU) driver is not selected. Next step for approval: select Mesa D3D12 for the gz processes (`GALLIUM_DRIVER=d3d12`, `sar_oakd` profile only, reversible), validated first, plus consider a larger WSL memory cap.
 - **State:** no arming, takeoff, or flight command. The `oakd2` stack, QGC, and the recorder are running; the vehicle is disarmed and landed.
+
+## D3D12 GPU rendering for sar_oakd (no flight) — 2026-10-18 21:43–21:51 UTC
+
+- **Start:** `master` at `236c4df` plus uncommitted d3d12 launcher changes. The `oakd2` stack was disarmed, landed, and software-rendered.
+- **Probe:** `GALLIUM_DRIVER=d3d12` alone selects the Intel UHD iGPU, which offers only GL 4.1 core. The user chose the RTX 3050 (`MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`, GL 4.6 core).
+- **Change:**
+  - For the camera profile only, `tools/isolated_sitl.py` writes both variables into the run-local `gz_env.sh`. `px4-rc.gzsim` sources that file before launching the gz server and GUI, so no other process, profile, or PX4 file is affected.
+  - `start --software-rendering` reverts to the default llvmpipe renderer.
+  - The manifest records `gz_rendering`.
+  - The full suite passes (222 tests).
+- **Gated restart:**
+  - Shutdown gate PASS at 21:45:17.
+  - The first `isolated_sitl.py stop` was **refused** (status 2.12 s old against its 2.0 s limit; with the slow simulation, status arrived about every 3 s). Nothing was stopped by that attempt.
+  - The unchanged gated stop passed on the retry (21:46:14: status 0.55 s, land 2.65 s old; disarmed and landed). All manifest groups exited.
+  - The recorder (PID 58707) was stopped with SIGINT before the first refusal, so the `oakd2` telemetry log ends at about 21:45:30.
+  - QGC (session 58696) was kept running.
+  - `restart_20261018_oakd3_gpu` started 21:46:46–21:47:00 with the GUI. Recorder: `logs/telemetry_full.jsonl`. Ogre2 log copy: `logs/ogre2_d3d12.log`.
+- **Renderer verified:** both gz processes map `libd3d12` and `libnvwgf2umx` and run no llvmpipe threads. Ogre2 reports `GL_RENDERER = D3D12 (NVIDIA GeForce RTX 3050 Laptop GPU)`, GL 4.6 core. The RTX 3050 runs at 36–51% (578 MiB). There are no rendering errors and no new compositor faults.
+- **Performance** (60 s windows, simulation rate from sensor stamps; `/home/hp/uav_ros_experiments/gst_camera_perf_20261018/`):
+
+| Metric | CPU rendering (oakd2) | D3D12 window 1 | D3D12 window 2 |
+|---|---|---|---|
+| Sim rate (RGB / depth / PX4) | 0.161 / 0.163 / 0.239 | **0.376 / 0.375 / 0.397** | **0.373 / 0.374 / 0.419** |
+| gz server CPU | 425% | 114% | 114% |
+| gz GUI CPU | ~206% | — | 111% |
+| RGB / depth (wall) | 2.5 / 2.4 Hz | 7.1 / 7.9 Hz | 7.0 / 8.4 Hz |
+| Perception (wall), max gap | 2.6 Hz, 1.55 s | 7.7 Hz, 0.52 s | 7.6 Hz, 0.44 s |
+| Status gap max / land gap max | 3.7 / 6.7 s | 1.7 / 3.1 s | 1.7 / 3.1 s |
+| RAM / swap used | 3037 / 782 MiB | 2825 / 567 MiB | 3079 / 634 MiB |
+
+- **Readiness:** `verify_isolated_topics` PASS (twice): disarmed, Hold, `preflight=true`, GCS connected, landed/at_rest, 49 LiDAR sectors. `verify_world_target` PASS.
+- **Positive ground-only detection** (vehicle untouched; static target fixture moved to ENU (2.2, 0.4, 0.055) at 21:49:04, then restored):
+  - 201 of 201 messages detected after the first 3 frames; 198 were range-valid.
+  - Bearing +10.34° against +10.30° ground truth; range 2.235 m against 2.236 m (0.03%). There were 3 bearing-only fallbacks.
+  - After the restore, 60 messages reported 0 detections and the gate passed 3/3.
+  - The GUI displayed the moved static sphere late (after the server-side restore); the server-side camera and pose were authoritative.
+- **Gate:** the simulation rate is ≥ 0.35 in both windows, but the margin is small (0.373–0.376 on the camera stamps). No arming, takeoff, or flight command was sent.

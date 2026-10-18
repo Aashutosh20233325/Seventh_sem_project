@@ -209,7 +209,9 @@ def ros_environment(
     return env
 
 
-def gz_env_script(profile: Profile = LEGACY, px4_server_config: bool = False) -> bytes:
+def gz_env_script(
+    profile: Profile = LEGACY, px4_server_config: bool = False, software_rendering: bool = False
+) -> bytes:
     """PX4's generated gz_env.sh, plus project asset paths (and server config) for project profiles."""
     script = PX4_GZ_ENV.read_bytes()
     if not profile.project_assets:
@@ -224,6 +226,12 @@ def gz_env_script(profile: Profile = LEGACY, px4_server_config: bool = False) ->
     )
     if profile.server_config is not None and not px4_server_config:
         override += f"export GZ_SIM_SERVER_CONFIG_PATH={shlex.quote(str(profile.server_config))}\n"
+    if profile.camera and not software_rendering:
+        # px4-rc.gzsim sources this file before starting the gz server and GUI, so
+        # these reach only those two processes. Without them Mesa uses llvmpipe
+        # (CPU); d3d12 alone selects the Intel iGPU (GL 4.1 core); the NVIDIA
+        # adapter gives GL 4.6 core (probe, 2026-10-18).
+        override += "export GALLIUM_DRIVER=d3d12\nexport MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA\n"
     return script + override.encode()
 
 
@@ -367,13 +375,20 @@ def _check_paths(run_dir: Path, profile: Profile = LEGACY) -> None:
         raise IsolationError(f"Run directory already contains data; refusing overwrite: {run_dir}")
 
 
-def _prepare_run_dir(run_dir: Path, profile: Profile = LEGACY, px4_server_config: bool = False) -> None:
+def _prepare_run_dir(
+    run_dir: Path,
+    profile: Profile = LEGACY,
+    px4_server_config: bool = False,
+    software_rendering: bool = False,
+) -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
     rootfs = run_dir / "px4_rootfs"
     (rootfs / "fs").mkdir(parents=True)
     # PX4's local gz startup script sources ./gz_env.sh from its working dir.
     # Copy the configuration, never link writable PX4 storage to the shared tree.
-    (rootfs / "gz_env.sh").write_bytes(gz_env_script(profile, px4_server_config))
+    (rootfs / "gz_env.sh").write_bytes(
+        gz_env_script(profile, px4_server_config, software_rendering)
+    )
     (run_dir / "logs").mkdir()
 
 
@@ -451,14 +466,19 @@ def _verified_record(record: dict[str, Any]) -> bool:
     )
 
 
-def start(run_dir: Path, profile: Profile = LEGACY, px4_server_config: bool = False) -> None:
+def start(
+    run_dir: Path,
+    profile: Profile = LEGACY,
+    px4_server_config: bool = False,
+    software_rendering: bool = False,
+) -> None:
     run_dir = run_dir.resolve()
     _check_paths(run_dir, profile)
     _assert_endpoint_free(XRCE_PORT)
     env_base = sourced_environment()
     env_ros = ros_environment(env_base, profile=profile)
     _assert_domain_and_partition_unused(env_ros)
-    _prepare_run_dir(run_dir, profile, px4_server_config)
+    _prepare_run_dir(run_dir, profile, px4_server_config, software_rendering)
 
     manifest: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -474,6 +494,11 @@ def start(run_dir: Path, profile: Profile = LEGACY, px4_server_config: bool = Fa
             str(profile.server_config)
             if profile.server_config is not None and not px4_server_config
             else "PX4 default (gz_env.sh)"
+        ),
+        "gz_rendering": (
+            "Mesa d3d12 (NVIDIA adapter)"
+            if profile.camera and not software_rendering
+            else "Mesa default (llvmpipe under WSLg)"
         ),
         "world": profile.world,
         "model": profile.sim_model,
@@ -693,10 +718,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="start only: revert to PX4's default gz server.config (re-enables GstCameraSystem)",
     )
+    parser.add_argument(
+        "--software-rendering",
+        action="store_true",
+        help="start only: do not select Mesa d3d12/NVIDIA for the camera profile "
+        "(reverts to the default llvmpipe CPU renderer)",
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "start":
-            start(args.run_dir, PROFILES[args.profile], args.px4_server_config)
+            start(
+                args.run_dir,
+                PROFILES[args.profile],
+                args.px4_server_config,
+                args.software_rendering,
+            )
         elif args.command == "status":
             status(args.run_dir)
         elif args.command == "stop":

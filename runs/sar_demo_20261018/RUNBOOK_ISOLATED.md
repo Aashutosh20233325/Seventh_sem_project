@@ -262,7 +262,7 @@ ROS_DOMAIN_ID=43 .venv/bin/python tools/verify_shutdown_state.py --duration 5 --
 
 ### 2. Start the project-asset profile
 
-`sar_oakd` uses `sim/server_no_gstreamer.config`: PX4's Gazebo server config without the GstCameraSystem UDP video streamer, which the camera, ROS, and perception path does not use. To restore PX4's default config, add `--px4-server-config`.
+`sar_oakd` uses `sim/server_no_gstreamer.config`: PX4's Gazebo server config without the GstCameraSystem UDP video streamer, which the camera, ROS, and perception path does not use. To restore PX4's default config, add `--px4-server-config`. The profile also renders the gz server and GUI on the RTX 3050 through Mesa D3D12 (`GALLIUM_DRIVER=d3d12`, `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`, set in the run-local `gz_env.sh`). Verify this with `~/.gz/rendering/ogre2.log` (`GL_RENDERER = D3D12 (NVIDIA ...)`) and the absence of `llvmpipe` threads. To revert to CPU rendering, add `--software-rendering`.
 
 It uses the versioned world and model, the camera bridge, the perception node, and the GUI.
 

@@ -273,7 +273,28 @@ def test_sar_oakd_uses_project_server_config_and_can_revert():
     default = isolated_sitl.gz_env_script(profile).decode()
     reverted = isolated_sitl.gz_env_script(profile, px4_server_config=True).decode()
 
-    assert default.endswith(line)                       # after PX4's own export, so it wins
+    assert line in default                              # after PX4's own export, so it wins
     assert default.index(line) > default.index("export GZ_SIM_SERVER_CONFIG_PATH=$PX4_GZ_SERVER_CONFIG")
     assert line not in reverted
     assert line not in isolated_sitl.gz_env_script(isolated_sitl.PROFILES["legacy"]).decode()
+
+
+def test_sar_oakd_selects_nvidia_d3d12_rendering_reversibly():
+    gpu = "export GALLIUM_DRIVER=d3d12\nexport MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA\n"
+    profile = isolated_sitl.PROFILES["sar_oakd"]
+    assert gpu in isolated_sitl.gz_env_script(profile).decode()
+    assert gpu not in isolated_sitl.gz_env_script(profile, software_rendering=True).decode()
+    assert "GALLIUM_DRIVER" not in isolated_sitl.gz_env_script(isolated_sitl.PROFILES["legacy"]).decode()
+
+
+def test_software_rendering_flag_reaches_run_local_gz_env(tmp_path, monkeypatch):
+    profile = isolated_sitl.PROFILES["sar_oakd"]
+    for flag, expect_gpu in ((False, True), (True, False)):
+        run = tmp_path / f"run_{flag}"
+        isolated_sitl._prepare_run_dir(run, profile, software_rendering=flag)
+        script = (run / "px4_rootfs" / "gz_env.sh").read_text()
+        assert ("export GALLIUM_DRIVER=d3d12\n" in script) == expect_gpu
+    help_text = __import__("subprocess").run(
+        [__import__("sys").executable, str(isolated_sitl.PROJECT / "tools/isolated_sitl.py"), "--help"],
+        capture_output=True, text=True).stdout
+    assert "--software-rendering" in help_text
