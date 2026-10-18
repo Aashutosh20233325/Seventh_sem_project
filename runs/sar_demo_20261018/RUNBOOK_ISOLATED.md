@@ -3,11 +3,11 @@
 This runbook describes the separately owned PX4 instance 1 validation stack.
 It leaves the pre-existing PX4 instance 0, its rootfs, ULog archive, XRCE
 agent, Gazebo partition, bridge, and observation publisher untouched. It does
-not authorize flight by itself. The currently verified isolated instance is
-disarmed, landed, and publishes fresh telemetry with passing preflight checks.
-PX4's final heading-good flag is expected to remain false on the ground with
-the configured in-flight magnetometer alignment; **do not start a flight until
-the supervised test is explicitly approved**.
+not authorize flight by itself. The active instance has completed one
+supervised smoke-test attempt, but PX4 remains armed in AUTO_LAND and has not
+confirmed landed/disarmed telemetry. Keep its control and telemetry processes
+running; do not start another flight or stop the stack until recovery is
+reviewed.
 
 ## Isolation layout
 
@@ -184,9 +184,8 @@ existing -0.8 m altitude gate and all current timeouts. Initial preflight must
 still pass with fresh landed/disarmed state, valid position, aligned and
 observable yaw, healthy magnetometer flags, GCS connected, and no failsafe.
 The final heading flag is verified during the bounded vertical ascent before
-the environment enters velocity control. This code path has not been tested
-in flight; the live instance remains grounded and no control command has been
-sent.
+the environment enters velocity control. The first supervised attempt below
+confirmed this transition, but landing confirmation failed.
 
 The ULog's IMU and magnetometer inputs are fresh and non-faulted: combined IMU
 data is recorded at 250 Hz, magnetometer readings are finite with zero error
@@ -215,3 +214,13 @@ idle session guards. The first successful no-shell launch produced an
 excessive prompt log; it was stopped only after the telemetry gate passed, and
 its 7.3 MB ULog is preserved. The active restart run's ULog continues to be
 written under its isolated rootfs.
+
+## Supervised smoke-test attempt 1 — landing unresolved
+
+- The user authorized one supervised test. The existing `test_px4_uav_env.py` ran exactly once against instance 1. No parameters, code, stack, or test retry were changed during the run.
+- Fresh preflight passed before start: system ID 2, disarmed, landed/at-rest/ground-contact, preflight true, failsafe false, GCS connected, valid local position, initial yaw alignment/observable consistent mag fusion, LiDAR 1080 beams, and 54 finite observations. PX4 had one subscriber on each Offboard mode and trajectory setpoint input.
+- PX4 ULog records accepted Offboard command 176 at PX4 time 732.812 s and accepted arm command 400 at 732.836 s (result 0). Status changed to Offboard at 732.824 s and armed at 732.836 s. It reached local NED z minimum -1.6308 m at PX4 time 741.552 s, crossing the unchanged -0.8 m gate. `heading_good_for_control` became true during this ascent. Reset returned a 54-value observation; the existing test executed all ten low-speed actions with no reported collision. These confirm command acceptance and motion separately.
+- PX4 accepted the environment's normal NAV_LAND command 21 (result 0) at PX4 time 741.756 s; PX4 logged “Landing at current position” and status entered AUTO_LAND at 741.768 s. `close()` timed out waiting for fresh landed/disarmed telemetry and warned that ROS control remains active. The non-daemon environment cleanup monitor is still running, with zero-velocity Offboard setpoints continuing at about 20 Hz.
+- Latest read-only sample at 2026-10-18 06:04:02 UTC: status system ID 2, armed (`arming_state=2`), `nav_state=18` AUTO_LAND, failsafe false, GCS connected; land flags `landed=false`, `at_rest=false`, `ground_contact=false`. Local position was near the origin (`z=0.032 m`, `vz=0.0055 m/s`) with final heading-good true. Near-ground position is not being treated as proof of landing. PX4 ULog also shows the land flags remained false through latest data at simulation time 887.156 s; the Gazebo model root pose was steady at approximately `(-0.0836, 0.0217, -0.0130)` across three read-only samples. No safe disarmed confirmation exists.
+- Telemetry log: `logs/takeoff_watch_after_close_20261018T055853Z.jsonl` (continuous 20 Hz Offboard/setpoint samples and PX4 state after recorder restart). Smoke output: `logs/supervised_smoke_20261018T055722Z.log`. Initial recorder `logs/takeoff_watch_20261018T055722Z.jsonl` has an early gap because the recorder crashed when serializing NumPy float32 setpoint fields; that error is known and the ULog supplements command ACK and climb evidence. PX4 log: `logs/px4_gazebo.log`. Active ULog: `px4_rootfs/fs/log/2026-10-18/05_27_19.ulg`.
+- Recovery is unresolved. Preserve the active environment cleanup monitor, telemetry recorder, PX4/Gazebo, XRCE, ROS bridge, observation publisher, and QGroundControl. Do not send more commands, force-disarm, stop processes, or retry without a separately approved recovery plan.
