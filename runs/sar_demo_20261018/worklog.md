@@ -174,3 +174,19 @@ Source/configuration inspection established:
 - Propellers: after landing, PX4's motor-speed command to Gazebo was `0,0,0,0`, and rotor_0's pose was unchanged across 3 s at 13:46:26.
 - Visual evidence: 40 GUI frames in `restart_20261018_visible3/logs/gui_frames/` (airborne about 13:45:30–13:45:47, landed at 13:46:00).
 - Analysis output: `/home/hp/uav_ros_experiments/landing_interleave_analysis_20261018/visible3_13_42_52.txt`.
+
+## Landing-fix commit and target/reward audit — 2026-10-18
+
+- Committed `e10b92e` ("Stop Offboard setpoints once PX4 confirms AUTO_LAND") with exactly four files. Before committing: 106 tests passed, `py_compile -W error` and `git diff --check` were clean. Run data stays gitignored.
+- Audit report: `runs/sar_demo_20261018/TARGET_REWARD_AUDIT.md`. Probes and outputs: `/home/hp/uav_ros_experiments/target_reward_audit_20261018/`.
+- Key measured findings:
+  - The frames agree: Gazebo (3, −3) ENU equals the env's (−3, 3) NED.
+  - PX4 heading is offset about 4° from the Gazebo yaw.
+  - The target is detected by the LiDAR on the ground but **never in flight**, because the scan plane at hover (about 1.9 m) passes over the 0.555 m sphere top.
+  - The observation has no ego-position or target vector.
+  - Simulation runs at about 0.49× real time, so one env step is about 0.05 s sim, wall-clocked.
+  - The smoke actions moved the vehicle at most 0.045 m/s.
+  - `reset()` does not reposition the vehicle.
+  - The target model is an uncommitted edit to the shared PX4 `walls.sdf`.
+  - SB3 and torch are not installed.
+- No environment, reward, or observation change was made. Proposals are in §6 of the audit and await review.
