@@ -22,7 +22,7 @@ def test_short_training_writes_artifacts_and_evaluates_deterministically(tmp_pat
     assert config["observation_version"] == "sar_obs_v1" and config["observation_dim"] == 65
     assert (run_dir / "final_model.zip").is_file() and list((run_dir / "checkpoints").glob("*.zip"))
     summary = json.loads((run_dir / "eval_summary.json").read_text())
-    assert set(summary) == {"ppo_final", "baseline"}
+    assert {"ppo_final", "baseline"} <= set(summary) <= {"ppo_final", "ppo_best", "baseline"}
     for metrics in summary.values():
         assert 0.0 <= metrics["success_rate"] <= 1.0 and np.isfinite(metrics["mean_return"])
 

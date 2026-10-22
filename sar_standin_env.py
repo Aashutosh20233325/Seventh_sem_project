@@ -18,6 +18,7 @@ This is an idealised model, not a substitute for SITL validation.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import xml.etree.ElementTree as ET
 
@@ -94,13 +95,16 @@ class SarStandInEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, randomize_start=False, perception_noise=True, detection_prob=0.95,
-                 perception_period_steps=2, perception_latency_steps=1, max_steps=None, seed=None):
+                 perception_period_steps=2, perception_latency_steps=1, max_steps=None, seed=None,
+                 task_config=None):
         super().__init__()
         self.action_space = spaces.Box(np.array([0.0, -1.0], np.float32), np.array([1.0, 1.0], np.float32))
         self.observation_space = spaces.Box(so.LOW, so.HIGH, dtype=np.float32)
-        self.task_config = sar_task.TaskConfig()
+        # task_config lets offline training vary reward weights; evaluation uses the default task.
+        self.task_config = task_config if task_config is not None else sar_task.TaskConfig()
         if max_steps is not None:
-            self.task_config = sar_task.TaskConfig(max_steps=max_steps)
+            self.task_config = dataclasses.replace(self.task_config, max_steps=max_steps)
+        self.start_range = None      # curriculum: (r_min, r_max, max_heading_error); None = default start
         self.target = sar_task.load_target()
         self.walls = load_walls()
         self.randomize_start = randomize_start
@@ -159,7 +163,9 @@ class SarStandInEnv(gym.Env):
         super().reset(seed=seed if seed is not None else self._initial_seed)
         self._initial_seed = None
         self.x, self.y, self.heading = 0.0, 0.0, math.pi / 2
-        if self.randomize_start:
+        if self.start_range is not None:
+            self._sample_curriculum_start()
+        elif self.randomize_start:
             self.x += self.np_random.uniform(-1.0, 1.0)
             self.y += self.np_random.uniform(-1.0, 1.0)
             self.heading = so.wrap(self.heading + self.np_random.uniform(-math.pi, math.pi))
@@ -174,6 +180,36 @@ class SarStandInEnv(gym.Env):
         self._schedule_perception()
         sectors = self._lidar()
         return self._observe(sectors), {"privileged": self._privileged()}
+
+    # ---------- start-state curriculum (training only) ----------
+    START_CLEARANCE = 0.6        # m of LiDAR clearance required at a curriculum start
+    START_TRIES = 200
+
+    def set_start_range(self, r_min=None, r_max=None, max_heading_error=None):
+        """Sample later resets at horizontal range [r_min, r_max] m from the target, heading within
+        +-max_heading_error rad of the target bearing. All None restores the default start distribution.
+        Only the start state changes; the observation, reward, and termination are untouched."""
+        if r_min is None:
+            self.start_range = None
+            return
+        if not self.task_config.success_radius < r_min <= r_max:
+            raise ValueError(f"need success_radius < r_min <= r_max, got {r_min}, {r_max}")
+        self.start_range = (float(r_min), float(r_max), float(max_heading_error))
+
+    def _sample_curriculum_start(self):
+        r_min, r_max, max_err = self.start_range
+        for _ in range(self.START_TRIES):
+            r = self.np_random.uniform(r_min, r_max)
+            phi = self.np_random.uniform(-math.pi, math.pi)
+            x, y = self.target.x_ned + r * math.cos(phi), self.target.y_ned + r * math.sin(phi)
+            if any(xmin <= x <= xmax and ymin <= y <= ymax for xmin, xmax, ymin, ymax in self.walls):
+                continue
+            self.x, self.y = x, y
+            to_target = math.atan2(self.target.y_ned - y, self.target.x_ned - x)
+            self.heading = so.wrap(to_target + self.np_random.uniform(-max_err, max_err))
+            if float(np.min(self._lidar())) >= self.START_CLEARANCE:
+                return
+        raise RuntimeError(f"no collision-free curriculum start found for {self.start_range}")
 
     def _schedule_perception(self):
         if self.steps % self.perception_period == 0:

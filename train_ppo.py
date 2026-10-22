@@ -20,6 +20,7 @@ Usage (short smoke run):
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import platform
 import sys
@@ -31,20 +32,59 @@ import numpy as np
 import stable_baselines3
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 import evaluate_policies
 import sar_observation
+import sar_task
 from sar_standin_env import SarStandInEnv
 
 PROJECT = Path(__file__).resolve().parent
 
 
-def make_env(seed, randomize_start, monitor_dir=None):
+# Start-state curriculum: (end of stage as a fraction of total timesteps, r_min, r_max, heading error deg).
+# The last stage (None) is the default start distribution, which is also the evaluation distribution.
+CURRICULUM = (
+    (0.25, 1.0, 1.75, 30.0),
+    (0.50, 1.0, 3.0, 90.0),
+    (0.70, 1.0, 4.5, 180.0),
+    (1.00, None, None, None),
+)
+
+
+class CurriculumCallback(BaseCallback):
+    """Advance the training envs' start range with training progress (evaluation envs are untouched)."""
+
+    def __init__(self, total_timesteps, stages=CURRICULUM):
+        super().__init__()
+        self.total = total_timesteps
+        self.stages = stages
+        self.stage = None
+        self.history = []
+
+    def _apply(self):
+        fraction = self.num_timesteps / self.total
+        stage = next(i for i, s in enumerate(self.stages) if fraction < s[0] or i == len(self.stages) - 1)
+        if stage != self.stage:
+            _, r_min, r_max, err = self.stages[stage]
+            self.training_env.env_method(
+                "set_start_range", r_min, r_max, None if err is None else np.radians(err))
+            self.stage = stage
+            self.history.append({"stage": stage, "timesteps": int(self.num_timesteps)})
+
+    def _on_training_start(self):
+        self._apply()
+
+    def _on_step(self):
+        self._apply()
+        return True
+
+
+def make_env(seed, randomize_start, monitor_dir=None, task_config=None):
     def _init():
-        env = SarStandInEnv(randomize_start=randomize_start, seed=seed)
+        env = SarStandInEnv(randomize_start=randomize_start, seed=seed, task_config=task_config)
         env = Monitor(env, str(monitor_dir / f"env_{seed}") if monitor_dir else None,
                       info_keywords=("reason",))
         env.reset(seed=seed)
@@ -69,6 +109,9 @@ def parse_args(argv=None):
     p.add_argument("--final-eval-episodes", type=int, default=30)
     p.add_argument("--torch-threads", type=int, default=2)
     p.add_argument("--run-dir", type=Path)
+    p.add_argument("--progress-weight", type=float,
+                   help="training-only reward weight per metre of progress (default: the task's)")
+    p.add_argument("--curriculum", action="store_true", help="staged start-state curriculum (CURRICULUM)")
     return p.parse_args(argv)
 
 
@@ -89,9 +132,18 @@ def main(argv=None):
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
 
+    train_config = sar_task.TaskConfig()
+    if args.progress_weight is not None:
+        train_config = dataclasses.replace(train_config, progress_weight=args.progress_weight)
+    config["train_task_config"] = dataclasses.asdict(train_config)
+    config["eval_task_config"] = dataclasses.asdict(sar_task.TaskConfig())
+    config["curriculum"] = CURRICULUM if args.curriculum else None
+    (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+
     monitor_dir = run_dir / "monitor"
     monitor_dir.mkdir()
-    train_env = DummyVecEnv([make_env(args.seed + i, args.randomize_start, monitor_dir) for i in range(args.n_envs)])
+    train_env = DummyVecEnv([make_env(args.seed + i, args.randomize_start, monitor_dir, train_config)
+                             for i in range(args.n_envs)])
     eval_env = DummyVecEnv([make_env(args.seed + 1000, args.randomize_start)])
     model = PPO(
         "MlpPolicy", train_env, n_steps=args.n_steps, batch_size=args.batch_size,
@@ -102,15 +154,21 @@ def main(argv=None):
         EvalCallback(eval_env, n_eval_episodes=args.eval_episodes, eval_freq=max(args.eval_freq // args.n_envs, 1),
                      best_model_save_path=str(run_dir), log_path=str(run_dir), deterministic=True),
     ]
+    curriculum = CurriculumCallback(args.total_timesteps) if args.curriculum else None
+    if curriculum is not None:
+        callbacks.append(curriculum)
     model.learn(total_timesteps=args.total_timesteps, callback=callbacks, progress_bar=False)
     model.save(run_dir / "final_model")
+    if curriculum is not None:
+        config["curriculum_history"] = curriculum.history
 
     # Final deterministic comparison against the baseline on held-out seeds.
     summary = {}
-    for name, (act, reset) in {
-        "ppo_final": evaluate_policies.ppo_policy(run_dir / "final_model.zip"),
-        "baseline": evaluate_policies.baseline_policy(),
-    }.items():
+    policies = {"ppo_final": evaluate_policies.ppo_policy(run_dir / "final_model.zip")}
+    if (run_dir / "best_model.zip").is_file():
+        policies["ppo_best"] = evaluate_policies.ppo_policy(run_dir / "best_model.zip")
+    policies["baseline"] = evaluate_policies.baseline_policy()
+    for name, (act, reset) in policies.items():
         env = SarStandInEnv(randomize_start=args.randomize_start)
         summary[name] = evaluate_policies.summarize(
             evaluate_policies.run_episodes(act, reset, env, args.final_eval_episodes, 10_000))
