@@ -425,3 +425,44 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Headless diagnostic:** not needed and not run.
 - **Test A margin:** Test A's end-window sim rate (0.335) was below the 0.35 gate under sampler, recorder, and probe load, so the D3D12 margin remains thin.
 - **State:** no simulation running; QGroundControl (58699) running. Nothing was armed or flown, and no project code changed.
+
+## Mesa D3D12 leak probe (Gazebo-free), no flight — 2026-10-22 04:49–05:00 UTC
+
+- **Probe:** a standalone off-screen GL loop rendering and reading back 1920x1080 RGB and 640x480 float frames at 10 Hz for 180 s. Each renderer was confirmed from its GL strings and the shared objects mapped into the process.
+- **Result:** flat on both renderers. llvmpipe: −0.00 MiB/min, maps 424 → 436. D3D12 on the RTX 3050 (Mesa 25.2.8-0ubuntu0.24.04.2): −0.00 MiB/min, maps 489 → 501. The Gazebo leak is not reproduced by a plain frame readback.
+- **Step B** (private Mesa 26.2.5) was not run, because its precondition was not met. No packages, PPA, or WSL settings were changed. The investigation is paused at the user's request.
+- **Evidence:** `/home/hp/uav_ros_experiments/mesa_d3d12_leak_20261022/README.md`.
+
+## Fresh no-flight readiness check with the runtime guard: FAILED (speed), stack stopped — 2026-10-22 05:40–05:45 UTC
+
+- **Start:** `master` at `2574773` (runtime guard), clean, with the full offline suite at 244 passed. Before the start, only QGroundControl was running.
+- **Run:** `restart_20261022_preflight1` (`--profile sar_oakd`, D3D12/RTX 3050, visible GUI). It used the gated start, recorder, readiness gates, six light 25 s stability windows, a concurrent read-only guard check, and the gated stop. Orchestration and evaluators: `/home/hp/uav_ros_experiments/preflight_guard_20261022/` (`run_preflight.sh`, `evaluate_window.py`, `guard_live_check.py`, run log, `restart_20261022_preflight1_mem.txt`). The evaluator reproduces the 2026-10-18 verdicts (6/6 PASS) and Test A's FAIL.
+- **Readiness gates — all PASS:**
+  - `verify_isolated_topics` passed on attempt 2, with the gate unchanged: disarmed, nav 4, no failsafe, preflight true, GCS connected, landed/at_rest, 49 sectors.
+  - `verify_world_target` passed.
+  - `/fmu/in/{offboard_control_mode,trajectory_setpoint,vehicle_command}` had 0 publishers.
+  - `ogre2.log` reported `GL_RENDERER = D3D12 (NVIDIA GeForce RTX 3050 Laptop GPU)`; the server had no llvmpipe threads.
+- **Stability check: 0/6 windows PASS.** The camera simulation speed was below the **unchanged 0.35× gate** in every window. Every other window criterion passed.
+
+| Window | Sim rate RGB / depth / PX4 | Status / land / perception gap (s) | Result |
+|---|---|---|---|
+| 1 | 0.342 / 0.334 / 0.405 | 1.69 / 3.23 / 0.45 | FAIL |
+| 2 | 0.347 / 0.344 / 0.404 | 1.64 / 3.13 / 0.40 | FAIL |
+| 3 | 0.334 / 0.334 / 0.334 | 1.61 / 3.09 / 0.60 | FAIL |
+| 4 | 0.343 / 0.343 / 0.404 | 1.63 / 3.22 / 0.51 | FAIL |
+| 5 | 0.343 / 0.343 / 0.406 | 1.57 / 3.10 / 0.60 | FAIL |
+| 6 | 0.335 / 0.335 / 0.397 | 1.77 / 3.32 / 0.60 | FAIL |
+
+  RGB/depth ran at 10.0–10.4 Hz wall, perception at 6.5–7.3 Hz, and LiDAR at about 10 Hz. The 2026-10-18 light check measured 0.359–0.395, so that margin did not reproduce.
+- **Memory:** MemAvailable fell from **1517 MiB** (30 s after start) to **1036 MiB** at 3.5 min, about −137 MiB/min. Swap stayed flat at 441 MiB.
+  - gz server RSS grew 581 → 758 MiB (about +50 MiB/min).
+  - gz GUI RSS grew 591 → 910 MiB (about +80 MiB/min).
+  - Consequence: start-up, gates, and six windows take about 4.5 min. By then MemAvailable is below the guard's 1.2 GiB start threshold, so `guard_refuse` would trigger even with passing speed.
+- **Live guard validation (read-only, `logs/guard_live_check.jsonl`):** `PX4UAVEnv` was not instantiated, so there were no `/fmu/in` publishers and no timer. A subscriptions-only node fed the env's own `position_callback`, `_advance_sim_clock`, and `perception_callback` into a shim, which the runner's `px4_telemetry` adapter and `RuntimeGuard` then read.
+  - **Freshness:** both clocks were populated and fresh in all 175 checks. Maximum age was PX4 0.10 s (limit 1.0) and camera 1.02 s (limit 1.5).
+  - **Accuracy:** guard rates matched an independent computation from the raw stamps to within 0.0024 (camera) and 0.015 (PX4, a window-edge difference). The guard used the lower clock, the camera.
+  - **Memory:** MemAvailable was populated (1323 → 1020 MiB).
+  - **Verdicts:** the preflight waited 29 s for a full window, then would have refused with `speed_below_floor` (speed 0.340). All 175 per-step checks returned `speed_below_floor`.
+  - **Not exercised live:** the stale, gap, and missing paths (unit-tested only), and in-episode behavior.
+- **Stop:** gated stop attempt 1 at 05:45:07. The gate passed (status 0.56 s, land 0.19 s old; disarmed, landed, at rest). Only manifest-owned groups were stopped, and the recorder was stopped with SIGINT. Afterwards no stack processes remained, and 2.7 GB was available.
+- **Outcome:** no arming, take-off, flight command, or episode. The live episode is blocked by the speed gate and the memory start threshold while the gz GUI runs on D3D12. No gate was changed. QGroundControl (58699) is still running. Logs: `runs/sar_demo_20261018/restart_20261022_preflight1/logs/`.
