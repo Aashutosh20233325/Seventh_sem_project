@@ -144,3 +144,55 @@ Success rate:
 - **Weak held-out test:** the exclusion radius (0.75 m) is small, and training targets came within 0.751 m of held-out positions. Those positions are therefore inside the trained region, and the test measures interpolation, not extrapolation to unseen areas.
 - **Single map:** one fixed wall layout and one target size, in the idealized stand-in.
 - **Not validated live:** nothing here is validated in Gazebo/PX4, where the live episode is still blocked by the readiness gates.
+
+## Stronger generalization test of E1R 300k (evaluation only, no training)
+
+**Run:** `runs/rl/exp20261022_generalization2/` (`evaluate_generalization.py`/`.out`, `evaluation.json` with all scenarios and episodes, and `trajectories/*.npz` with per-step x, y, heading, distance, det_now, est_valid, speed, turn). No model, checkpoint, training setting, or tracked code was changed.
+
+**Why held-out regions must lie beyond 6 m:** every 30° bearing sector of the training band (2.5–6 m from the start) contains training draws (8107 draws, 100k + 300k runs). No unseen region exists at training distances, so the held-out regions lie beyond it. **Distance is therefore a confound:** these targets are also farther than any training target.
+
+**Scenarios** (50 each; target i is paired with episode seed 10000+i, which fixes the start, identically for every policy):
+
+| Scenario | Targets | Notes |
+|---|---|---|
+| `region_W` | x ∈ [−8.5, −7.5], y ∈ [−1.5, 2.5] | 7.6–8.7 m from start; ≥ 1.63 m from every training draw |
+| `region_S` | x ∈ [−1.5, 2.5], y ∈ [−8.5, −7.5] | 7.5–8.7 m; ≥ 1.52 m |
+| `region_SW` | x, y ∈ [−8.5, −6.5] | 9.5–11.9 m; ≥ 3.49 m |
+| `reference` | the 50 earlier random-world targets | training layout |
+| `layout_open` | same targets | all walls removed |
+| `layout_interior` | seeded training-sampler draws ≥ 1 m from the new wall | training walls plus an unseen interior wall x ∈ [−2.4, −2.1], y ∈ [0.5, 4.0]; the wall blocks the start-to-target line in 4/50 scenarios |
+
+- **Exclusion buffer:** 1.5 m (twice the success radius) from every recorded training draw. It is asserted.
+- **Region targets:** sampled with seed 20261022 and recorded in `evaluation.json`.
+- **Leakage check:** camera-blind observations were identical for two different targets in every scenario (asserted before evaluation).
+
+| Success / collision / timeout | region_W | region_S | region_SW | reference | layout_open | layout_interior |
+|---|---|---|---|---|---|---|
+| Baseline | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .88/0/.12 |
+| E1R 300k s1 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .98/0/.02 | .94/**.06**/0 |
+| E1R 300k s2 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .86/**.14**/0 |
+| E1R 300k s3 | .94/0/.06 | 1/0/0 | .86/0/.14 | 1/0/0 | .96/0/.04 | .90/**.10**/0 |
+
+Mean episode length (s) and return:
+
+| | region_W | region_S | region_SW | reference | layout_open | layout_interior |
+|---|---|---|---|---|---|---|
+| Baseline | 20.3 / 87.1 | 20.3 / 87.0 | 22.1 / 87.7 | 15.7 / 87.6 | 15.7 / 87.6 | 21.1 / 70.0 |
+| s1 | 12.3 / 95.1 | 12.8 / 94.5 | 14.9 / 94.9 | 9.1 / 94.3 | 15.8 / 85.5 | 8.9 / 82.6 |
+| s2 | 12.2 / 95.2 | 12.5 / 94.8 | 13.8 / 96.0 | 8.6 / 94.8 | 8.6 / 94.8 | 7.7 / 67.7 |
+| s3 | 16.0 / 85.4 | 12.9 / 94.4 | 29.5 / 66.2 | 9.1 / 94.2 | 17.6 / 81.7 | 8.9 / 74.5 |
+
+Every policy detected the target in 100% of episodes in every scenario.
+
+**Findings (verified from the trajectories):**
+- **Unseen regions:** s1 and s2 reached 100% in all three, with no collisions, faster than the baseline. s3 reached 0.94 / 1.00 / 0.86. Each s3 timeout (3 in W, 7 in SW, 2 in the open layout) is the known final-approach failure: the target was detected, the vehicle got to 0.75–0.93 m, then spun in place (|turn| = 1.0, speed 0 over the last 200 steps). The 300k s3 policy's final approach is still fragile off-distribution.
+- **Open layout** (LiDAR sees nothing): 0.98 / 1.00 / 0.96. The policies do not depend on the wall layout for search.
+- **Interior wall: the first PPO collisions in any evaluation, 6–14%.** 14 of the 15 PPO collisions are with the new interior wall, at final target distances of 1.7–4.3 m. Most occur in the scenarios where the wall blocks the direct line (episodes 9, 14, 25, 33 for every seed).
+  - The baseline never collides. Its explicit obstacle stop holds it at the wall, and it times out instead (6/50, stuck behind the wall at 3.4–5.2 m; it has no path planning).
+  - Cause: training targets were always in open space, with walls only at the periphery, so PPO never learned to avoid an obstacle on the way to the target. This is a safety-relevant gap.
+- **Comparability limitations:**
+  - The stand-in camera model has no occlusion, so a target behind the interior wall stays "visible" to both policies. That inflates the pull toward the wall compared with a real camera.
+  - Walls were replaced as evaluation-only data; the observation and reward code is unchanged.
+  - Region targets are farther than training targets, which confounds distance with novelty.
+
+**Tests:** 264 passed (full offline suite; 53 in the RL/stand-in/observation subset). No tracked code changed.
