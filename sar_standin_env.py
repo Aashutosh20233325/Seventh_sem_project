@@ -47,6 +47,29 @@ CAM_HALF_VFOV = math.atan(540 / 1397.2235870361328)
 CAM_PITCH = tp.MOUNT_PITCH
 
 
+# Randomized-target training (offline only). Targets are sampled in the open corner bounded by the north
+# (x ~ 4.5-5.5) and east (y ~ 4.5-5.5) walls, never near a wall, the start, or a held-out position.
+TARGET_REGION = (-6.0, 3.5, -6.0, 3.5)            # NED x_min, x_max, y_min, y_max
+TARGET_WALL_CLEARANCE = 1.0                       # m from any wall box
+TARGET_START_RANGE = (2.5, 6.0)                   # m from the nominal start (0, 0); starts vary by <= 1.4 m
+# Held out of training: the world's nominal target plus five evaluation positions.
+HELD_OUT_TARGETS = ((-3.0, 3.0), (-3.0, -2.5), (2.0, -3.0), (-1.0, 3.0), (-5.5, 0.5), (1.5, 2.5))
+HELD_OUT_RADIUS = 0.75                            # m exclusion disc around each held-out position
+
+
+def box_distance(x, y, box):
+    xmin, xmax, ymin, ymax = box
+    return math.hypot(max(xmin - x, 0.0, x - xmax), max(ymin - y, 0.0, y - ymax))
+
+
+def valid_random_target(x, y, walls, held_out=HELD_OUT_TARGETS):
+    x_min, x_max, y_min, y_max = TARGET_REGION
+    return (x_min <= x <= x_max and y_min <= y <= y_max
+            and TARGET_START_RANGE[0] <= math.hypot(x, y) <= TARGET_START_RANGE[1]
+            and all(box_distance(x, y, w) >= TARGET_WALL_CLEARANCE for w in walls)
+            and all(math.hypot(x - hx, y - hy) > HELD_OUT_RADIUS for hx, hy in held_out))
+
+
 def load_walls(world_sdf=sar_task.WORLD_SDF):
     """Wall boxes as NED rectangles (xmin, xmax, ymin, ymax)."""
     walls = []
@@ -96,7 +119,7 @@ class SarStandInEnv(gym.Env):
 
     def __init__(self, randomize_start=False, perception_noise=True, detection_prob=0.95,
                  perception_period_steps=2, perception_latency_steps=1, max_steps=None, seed=None,
-                 task_config=None):
+                 task_config=None, randomize_target=False):
         super().__init__()
         self.action_space = spaces.Box(np.array([0.0, -1.0], np.float32), np.array([1.0, 1.0], np.float32))
         self.observation_space = spaces.Box(so.LOW, so.HIGH, dtype=np.float32)
@@ -105,8 +128,13 @@ class SarStandInEnv(gym.Env):
         if max_steps is not None:
             self.task_config = dataclasses.replace(self.task_config, max_steps=max_steps)
         self.start_range = None      # curriculum: (r_min, r_max, max_heading_error); None = default start
-        self.target = sar_task.load_target()
+        self.nominal_target = sar_task.load_target()
+        self.target = self.nominal_target
         self.walls = load_walls()
+        # Offline training only: a new collision-free target each reset (ground truth for reward, the camera
+        # model, and evaluation; it never enters the observation). sampled_targets records every draw.
+        self.randomize_target = randomize_target
+        self.sampled_targets = []
         self.randomize_start = randomize_start
         self.perception_noise = perception_noise
         self.detection_prob = detection_prob
@@ -162,6 +190,8 @@ class SarStandInEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed if seed is not None else self._initial_seed)
         self._initial_seed = None
+        if self.randomize_target:
+            self._sample_target()
         self.x, self.y, self.heading = 0.0, 0.0, math.pi / 2
         if self.start_range is not None:
             self._sample_curriculum_start()
@@ -180,6 +210,16 @@ class SarStandInEnv(gym.Env):
         self._schedule_perception()
         sectors = self._lidar()
         return self._observe(sectors), {"privileged": self._privileged()}
+
+    def _sample_target(self):
+        x_min, x_max, y_min, y_max = TARGET_REGION
+        for _ in range(1000):
+            x, y = self.np_random.uniform(x_min, x_max), self.np_random.uniform(y_min, y_max)
+            if valid_random_target(x, y, self.walls):
+                self.target = dataclasses.replace(self.nominal_target, x_ned=float(x), y_ned=float(y))
+                self.sampled_targets.append((self.target.x_ned, self.target.y_ned))
+                return
+        raise RuntimeError("no valid random target found")
 
     # ---------- start-state curriculum (training only) ----------
     START_CLEARANCE = 0.6        # m of LiDAR clearance required at a curriculum start

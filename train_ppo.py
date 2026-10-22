@@ -82,9 +82,10 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
-def make_env(seed, randomize_start, monitor_dir=None, task_config=None):
+def make_env(seed, randomize_start, monitor_dir=None, task_config=None, randomize_target=False):
     def _init():
-        env = SarStandInEnv(randomize_start=randomize_start, seed=seed, task_config=task_config)
+        env = SarStandInEnv(randomize_start=randomize_start, seed=seed, task_config=task_config,
+                            randomize_target=randomize_target)
         env = Monitor(env, str(monitor_dir / f"env_{seed}") if monitor_dir else None,
                       info_keywords=("reason",))
         env.reset(seed=seed)
@@ -112,6 +113,9 @@ def parse_args(argv=None):
     p.add_argument("--progress-weight", type=float,
                    help="training-only reward weight per metre of progress (default: the task's)")
     p.add_argument("--curriculum", action="store_true", help="staged start-state curriculum (CURRICULUM)")
+    p.add_argument("--randomize-target", action="store_true",
+                   help="new random target each episode (training, best-model selection and final evaluation; "
+                        "held-out positions are never sampled)")
     return p.parse_args(argv)
 
 
@@ -142,9 +146,11 @@ def main(argv=None):
 
     monitor_dir = run_dir / "monitor"
     monitor_dir.mkdir()
-    train_env = DummyVecEnv([make_env(args.seed + i, args.randomize_start, monitor_dir, train_config)
-                             for i in range(args.n_envs)])
-    eval_env = DummyVecEnv([make_env(args.seed + 1000, args.randomize_start)])
+    config["randomize_target"] = args.randomize_target
+    (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    train_env = DummyVecEnv([make_env(args.seed + i, args.randomize_start, monitor_dir, train_config,
+                                      args.randomize_target) for i in range(args.n_envs)])
+    eval_env = DummyVecEnv([make_env(args.seed + 1000, args.randomize_start, randomize_target=args.randomize_target)])
     model = PPO(
         "MlpPolicy", train_env, n_steps=args.n_steps, batch_size=args.batch_size,
         learning_rate=args.learning_rate, gamma=args.gamma, seed=args.seed, device="cpu", verbose=0,
@@ -159,6 +165,10 @@ def main(argv=None):
         callbacks.append(curriculum)
     model.learn(total_timesteps=args.total_timesteps, callback=callbacks, progress_bar=False)
     model.save(run_dir / "final_model")
+    if args.randomize_target:
+        targets = train_env.get_attr("sampled_targets")
+        (run_dir / "sampled_targets.json").write_text(json.dumps({"per_env": targets}) + "\n")
+        config["sampled_target_count"] = sum(len(t) for t in targets)
     if curriculum is not None:
         config["curriculum_history"] = curriculum.history
 
@@ -169,7 +179,7 @@ def main(argv=None):
         policies["ppo_best"] = evaluate_policies.ppo_policy(run_dir / "best_model.zip")
     policies["baseline"] = evaluate_policies.baseline_policy()
     for name, (act, reset) in policies.items():
-        env = SarStandInEnv(randomize_start=args.randomize_start)
+        env = SarStandInEnv(randomize_start=args.randomize_start, randomize_target=args.randomize_target)
         summary[name] = evaluate_policies.summarize(
             evaluate_policies.run_episodes(act, reset, env, args.final_eval_episodes, 10_000))
     config["finished_utc"] = datetime.now(timezone.utc).isoformat()
