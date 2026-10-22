@@ -307,6 +307,14 @@ gz topic -e -n 10 -t /world/sar_walls/stats | grep real_time_factor
 
 If takeoff, the start-pose flight, or landing confirmation fails: do not retry, do not force-disarm, and leave the stack running if landed/disarmed is not confirmed.
 
+**Runtime guard (`run_target_reaching_episode.py`, SITL only).** This adds to the readiness gates above and replaces none of them:
+- **Before reset/take-off:** refuses (`guard_refuse`, no arming) unless `MemAvailable` ≥ 1.2 GiB and a full 25 s window shows simulation speed ≥ 0.35×. It waits at most 60 s for that window.
+- **Before every step:** aborts (`guard_abort`) if `MemAvailable` < 600 MiB or the 25 s speed is < 0.35×. Speed is the lower of the PX4 local-position clock and the camera image-stamp clock.
+- **Missing data fails:** missing or stale telemetry (PX4 > 1.0 s, camera > 1.5 s), a gap > 5 s inside the window, or unreadable memory counts as a failure, never as healthy.
+- **What an abort does:** stops actions and calls the unchanged `close()`: zero action, one NAV_LAND, wait for fresh landed-and-disarmed, ROS kept alive until confirmed. There is no retry.
+- **Logging:** each record carries measurements, thresholds and timestamps. `guard_sample` records every 5 s also cover reset and close, where the guard only logs.
+- **Not covered:** the guard cannot interrupt `reset()` (take-off ≤ 45 s wall, fly-to-start ≤ 120 s wall) or a step's return-to-start; those keep their own bounded timeouts.
+
 ### Unverified live
 
 - The altitude-hold setpoint form (position z + xy velocity under the Offboard position flag).
