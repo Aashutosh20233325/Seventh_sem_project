@@ -196,3 +196,53 @@ Every policy detected the target in 100% of episodes in every scenario.
   - Region targets are farther than training targets, which confounds distance with novelty.
 
 **Tests:** 264 passed (full offline suite; 53 in the RL/stand-in/observation subset). No tracked code changed.
+
+## LiDAR safety filter around E1R 300k (evaluation only; filter code `081211e`)
+
+**Filter (`safety_layer.LidarSafetyFilter`):** the baseline controller's obstacle rule applied to the policy's action, using only the observation's 49 LiDAR sectors. First match wins:
+1. **Invalid LiDAR** (missing, wrong length, non-finite, outside [0, 1]): hover (0, 0).
+2. **Stale or unknown LiDAR age** (`None` or > 0.5 s): hover (0, 0).
+3. **Any sector < 0.5 m** (emergency): speed 0, turn ±0.8 toward the clearer half (larger mean range).
+4. **Front clearance < 1.2 m** (minimum over |angle| ≤ 35°): speed 0, turn ±0.8 toward the clearer half. This is the baseline's stop rule.
+5. **Front clearance < 3.0 m:** speed capped at 0.8·(front − 1.2)/1.8, keeping the policy's turn. This is the baseline's slow rule.
+6. **Otherwise:** the action passes unchanged.
+
+The filter never increases speed. The original action, the applied action, and an intervention code are logged per step.
+
+**Evaluation:** `runs/rl/exp20261022_safety_layer/` (`evaluate_safety_layer.py`/`.out`, `evaluation.json`, `trajectories/*.npz`).
+- **Scenarios:** loaded unchanged from the generalization evaluation: the same targets, walls, and episode seeds for all 7 policies (baseline, PPO s1–3 unfiltered, PPO s1–3 + filter), 50 episodes each.
+- **LiDAR age:** the stand-in computes LiDAR every step, so `lidar_age_s = 0.0`.
+- **Reproducibility:** the unfiltered PPO and baseline numbers reproduce the generalization evaluation exactly.
+
+Success / collision / timeout:
+
+| | reference | region_W | region_S | region_SW | layout_open | layout_interior |
+|---|---|---|---|---|---|---|
+| Baseline | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .88/0/.12 |
+| s1 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .98/0/.02 | .94/**.06**/0 |
+| s1 + filter | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .98/0/.02 | .94/**0**/.06 |
+| s2 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .86/**.14**/0 |
+| s2 + filter | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | 1/0/0 | .92/**0**/.08 |
+| s3 | 1/0/0 | .94/0/.06 | 1/0/0 | .86/0/.14 | .96/0/.04 | .90/**.10**/0 |
+| s3 + filter | **.98**/0/.02 | .94/0/.06 | 1/0/0 | .86/0/.14 | .96/0/.04 | .92/**0**/.08 |
+
+Interventions (mean per episode / episodes with any, of 50):
+
+| | reference | region_W | region_S | region_SW | layout_open | layout_interior |
+|---|---|---|---|---|---|---|
+| s1 + filter | 3.4 / 11 | 0.1 / 2 | 0 / 0 | 0 / 0 | 0 / 0 | 43.4 / 22 |
+| s2 + filter | 4.0 / 12 | 0 / 0 | 0.4 / 6 | 0 / 0 | 0 / 0 | 67.7 / 40 |
+| s3 + filter | 3.9 / 12 | 0.7 / 3 | 0 / 0 | 0 / 0 | 0 / 0 | 54.8 / 23 |
+
+- **By reason:** only `slow` outside the interior layout. In the interior layout, `slow` 1297 / 2653 / 1913 and `stop` 871 / 731 / 829 across all steps; one `emergency` (s1). No invalid or stale LiDAR (not expected in the stand-in).
+- **Mean duration of successful episodes (s):** unchanged where the filter rarely acts (all regions and the open layout identical). Reference +0.1–0.2 s. Interior wall 9.2 → 10.2 (s1), 8.0 → 10.3 (s2), 9.0 → 10.4 (s3). The baseline is 15.7–22.1 s.
+
+**Findings:**
+- **Collisions eliminated:** all 15 interior-wall collisions (6 / 14 / 10%) became 0, and no collisions appeared anywhere else. Interior-wall success: s1 .94 → .94, s2 .86 → .92, s3 .90 → .92. Of the 15 avoided collisions, 5 became successes and 10 became timeouts.
+- **The filter is not path planning.** Every new interior timeout ends with the vehicle held about 1.2 m from the interior wall (0.6 m in two s3/s2 cases), the target 2.4–5.2 m away behind it, and stop interventions in 31–56% of the last 200 steps. The policy keeps pushing toward the target (visible through the wall, since the stand-in camera has no occlusion), the filter keeps stopping it, and the vehicle stays stuck. The unfiltered baseline fails the same way (6 timeouts).
+- **One regression:** s3 reference episode 20 went from success to timeout. Its only interventions were `slow` caps. Near the end no filter action was active (applied speed 0 came from the policy), and it ended at 0.86 m. The perturbed approach exposed s3's known final-approach spin, not a safety stop.
+- **Limitations:**
+  - This is the idealized stand-in: point-mass dynamics with a 0.45 s velocity lag, fresh noiseless LiDAR every step, no camera occlusion.
+  - The 1.2 m stop distance and 0.5 m emergency margin are the baseline's and have not been validated against PX4 braking in SITL.
+  - Stale and invalid LiDAR handling is unit-tested only.
+  - The filter is not wired into the live env or the flight runner.
