@@ -83,3 +83,64 @@ Success rate per condition. Collisions were 0 in every cell.
 - **E1R s3 timeouts (26/30):** 11 never detected the target and barely moved (speed ≈ 0), the original stand-still optimum. 15 detected it but stalled 0.8–3 m away.
   - Its evaluation curve stayed at about −59 for all 100k steps. s1 and s2 were still rising at 95k (s1 reached 76, s2 95).
 - **Interpretation:** at 100k steps the outcome depends on whether a seed escapes the stand-still optimum early. Seeds that escape then still have to learn the memory-based final approach.
+
+## E1R at 300k steps: training duration only (code `16f6814`)
+
+**Training:** identical to E1R except `--total-timesteps 300000`. Seeds 1/2/3, progress weight 10, randomized targets and starts, unchanged PPO settings and target sampler. Run directory: `runs/rl/exp20261022_randtarget300k/` (`run_train.sh`, logs, checkpoints every 10k steps, `sampled_targets.json`, `evaluate_matrix.py`/`.out`, `evaluation.json`, `approach_diagnostic.py`/`.json`/`.out`). The 100k runs are untouched.
+
+**Learning curves** (`evaluations.npz`: 10 deterministic episodes every 5k steps on random targets):
+
+| Seed | Return at 100k | First ≥ 90 | Minimum over 200–300k |
+|---|---|---|---|
+| s1 | 61.2 | 135k | 94.3 |
+| s2 | 94.3 | 95k | 92.8 |
+| s3 | −43.8 | 185k | 78.4 |
+
+- **s3** stayed in the stationary policy (about −59) until about 145k, rose from 160k, and ended at about 95.
+- **Reproducibility:** same-seed runs are not bit-identical. s1's curve at 100k differs from the separate 100k run (CPU torch nondeterminism), so the 300k run's 100k checkpoint is not the earlier 100k model.
+
+**Evaluation:**
+- Same matrix as the 100k evaluation: 50 episodes per cell, seeds 10000–10049, default task reward, final models.
+- The random-world targets are asserted identical to the 100k evaluation's.
+- Training draws stayed outside every held-out exclusion disc. The closest approaches were 0.7510 / 0.7508 / 0.7501 m against the 0.75 m radius.
+
+Success rate:
+
+| Policy | Nominal | A | B | C | D | E | Random world | Camera blind |
+|---|---|---|---|---|---|---|---|---|
+| Baseline | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0.00 |
+| E1R 100k s1 | .56 | .72 | .94 | .82 | .36 | .94 | .72 | 0 |
+| E1R 100k s2 | .84 | 1.00 | .98 | 1.00 | 1.00 | 1.00 | 1.00 | 0 |
+| E1R 100k s3 | .00 | .00 | .26 | .00 | .00 | .04 | .14 | 0 |
+| **E1R 300k s1** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | 0 |
+| **E1R 300k s2** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | 0 |
+| **E1R 300k s3** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | 0 |
+
+- **Collisions:** 0 in every cell.
+- **E1R 300k episode length:** 6.2–9.7 s across seeds and positions; random world 8.6–8.9 s. Return is 93.8–96.2 in every success cell. The baseline takes 13.3–16.9 s (return 87.1–89.7).
+- **Camera blind:** 0% for every policy (return −60 to −61.5). Expected, and a diagnostic only.
+- **Changes from 100k:** no cell regressed. Every 100k cell below 1.00 rose to 1.00, including s2's nominal (0.84 → 1.00).
+
+**Final-approach diagnosis** (`approach_diagnostic.py`, 50 random-world episodes per model):
+- Each failure is classified from the per-step detection and estimate history, not assumed: never detected; stalled while the target was visible (never within the camera's 1.05 m near limit); or lost inside 1.05 m.
+
+| Model | Success | Never detected | Stalled visible | Lost in blind zone |
+|---|---|---|---|---|
+| Baseline | 50/50 | – | – | – |
+| E1R 100k s1 | 36/50 | 0 | 0 | 14 |
+| E1R 100k s2 | 50/50 | – | – | – |
+| E1R 100k s3 | 7/50 | 15 | 18 | 10 |
+| E1R 300k s1 / s2 / s3 | 50/50 each | – | – | – |
+
+- **What the blind-zone failures (100k) show:**
+  - **Entry:** they entered the near zone off-axis. The target was 53° (s1) or 33° (s3) from the nose, so it left the side of the camera view (half-HFOV about 34°) as well as the bottom.
+  - **The estimate was not the problem:** it was valid at entry in 100% of cases and accurate where valid (range error 0.02 m, bearing error 3.5° for s1 and 1.1° for s3).
+  - **The policy did not use it:** s1 spun in place (|turn| 0.83 over the first 10 steps, then 0.99, speed ≈ 0). s3 froze (speed ≈ 0, |turn| ≈ 0.04).
+  - **Result:** the 8 s estimate then expired (valid in only 18% of blind-zone steps), leaving the vehicle at 0.83–0.85 m, just outside the 0.75 m success radius.
+  - **Conclusion:** the near-field visibility limit triggers the failure, but the cause is the policy's response (no forward motion on a valid estimate). Missing or wrong information is not the cause.
+- **s3 at 100k also showed the stand-still optimum:** 15 episodes never detected the target and 18 stalled about 2.6 m away with the target visible, both with speed ≈ 0. All three failure classes are absent at 300k.
+
+**Limitations:**
+- **Weak held-out test:** the exclusion radius (0.75 m) is small, and training targets came within 0.751 m of held-out positions. Those positions are therefore inside the trained region, and the test measures interpolation, not extrapolation to unseen areas.
+- **Single map:** one fixed wall layout and one target size, in the idealized stand-in.
+- **Not validated live:** nothing here is validated in Gazebo/PX4, where the live episode is still blocked by the readiness gates.
