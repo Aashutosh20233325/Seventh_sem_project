@@ -180,3 +180,40 @@ def test_render_check_default_mode_requires_only_a_gpu_server(monkeypatch, tmp_p
 def test_cli_exposes_flag_and_rejects_legacy_split(tmp_path, capsys):
     assert iso.main(["start", "--profile", "legacy", "--split-rendering", "--run-dir", str(tmp_path / "r")]) == 2
     assert "split-rendering" in capsys.readouterr().err and not (tmp_path / "r").exists()
+
+
+# ---------- regression: real gz cmdline format (2026-10-23 restart_20261023_split1) ----------
+
+REAL_SERVER_RAW = b"gz sim --verbose=1 -r -s /home/hp/uav_ros/sim/worlds/sar_walls.sdf" + b"\0" * 24
+REAL_GUI_RAW = b"gz sim -g" + b"\0" * 45
+
+
+def _parse_like_proc(raw):
+    """Exactly what iso._cmdline returns for these bytes."""
+    return [item.decode(errors="replace") for item in raw.split(b"\0") if item]
+
+
+def test_real_nul_padded_single_string_cmdline_is_classified(tmp_path, monkeypatch):
+    server, gui = _parse_like_proc(REAL_SERVER_RAW), _parse_like_proc(REAL_GUI_RAW)
+    assert len(server) == 1 and " " in server[0]                     # the format that broke the first parser
+    assert iso._gz_role(server) == "server" and iso._gz_role(gui) == "gui"
+    assert iso._gz_role(["gz", "sim", "--verbose=1", "-r", "-s", "w.sdf"]) == "server"  # argv form still works
+    for other in (["px4"], ["gz topic -l"], ["ruby"], [], ["/usr/bin/python3", "x.py", "-s"]):
+        assert iso._gz_role(other) is None
+
+
+def test_cmdline_reader_yields_the_single_string_form(tmp_path, monkeypatch):
+    fake = tmp_path / "cmdline"
+    fake.write_bytes(REAL_SERVER_RAW)
+    real_path = iso.Path
+    monkeypatch.setattr(iso, "Path", lambda p: fake if str(p) == "/proc/4242/cmdline" else real_path(p))
+    assert iso._cmdline(4242) == ["gz sim --verbose=1 -r -s /home/hp/uav_ros/sim/worlds/sar_walls.sdf"]
+
+
+def test_render_check_passes_with_the_real_cmdline_format(monkeypatch, tmp_path):
+    _render_fixture(monkeypatch, split=True)
+    cmds = {201: ["px4"], 202: _parse_like_proc(REAL_SERVER_RAW), 301: _parse_like_proc(REAL_GUI_RAW)}
+    monkeypatch.setattr(iso, "_cmdline", lambda pid: cmds.get(pid))
+    report = iso.render_report(tmp_path)
+    assert report["ok"] and set(report["processes"]) == {"server", "gui"}
+    assert report["processes"]["server"]["pid"] == 202 and report["processes"]["gui"]["pid"] == 301

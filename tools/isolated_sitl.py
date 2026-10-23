@@ -764,15 +764,25 @@ def _thread_names(pid: int) -> list[str] | None:
         return None
 
 
+def _gz_role(cmd: list[str]) -> str | None:
+    """"server" (gz sim ... -s), "gui" (gz sim -g) or None.
+
+    gz (a Ruby front end) rewrites its process title, so /proc/<pid>/cmdline is one space-joined string
+    padded with NULs (observed 2026-10-23: "gz sim --verbose=1 -r -s <world>" + NULs) rather than
+    NUL-separated arguments. Tokenize whitespace inside arguments so both forms are recognized."""
+    tokens = [token for arg in cmd for token in arg.split()]
+    if len(tokens) < 2 or Path(tokens[0]).name not in ("gz", "ruby") or "sim" not in tokens:
+        return None
+    return "server" if "-s" in tokens else "gui" if "-g" in tokens else None
+
+
 def _gz_processes(pgid: int) -> dict[str, int]:
     """gz sim server (-s) and GUI (-g) processes inside one owned process group."""
     candidates: dict[str, list[int]] = {}
     for pid in _live_group_members(pgid):
-        cmd = _cmdline(pid) or []
-        if len(cmd) >= 2 and Path(cmd[0]).name in ("gz", "ruby") and "sim" in cmd:
-            role = "server" if "-s" in cmd else "gui" if "-g" in cmd else None
-            if role:
-                candidates.setdefault(role, []).append(pid)
+        role = _gz_role(_cmdline(pid) or [])
+        if role:
+            candidates.setdefault(role, []).append(pid)
     # If a wrapper and the renderer share a command line, the renderer is the one with the most threads.
     return {role: max(pids, key=lambda p: len(_thread_names(p) or [])) for role, pids in candidates.items()}
 
