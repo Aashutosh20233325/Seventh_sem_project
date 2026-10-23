@@ -273,3 +273,68 @@ Interior-wall layout, success / collision / timeout, without → with occlusion:
 - **s3:** 4 former collisions became timeouts with **0 detections**. The target stayed hidden and its search never found it.
 - **s2 still collides in 6 episodes.** Two of them had 0–1 occluded frames: the target was visible past the wall's end, and the vehicle cut the corner into the wall. The others had short detections followed by a direct approach into the wall.
 - **Conclusion (confirmed):** occlusion removes the see-through artefact. The remaining collisions show that the 300k policies lack obstacle avoidance independently of the camera model. The safety filter still prevents every collision.
+
+## Randomized-obstacle training, E2O (stand-in only; code `505048d`, generator fix `7b88a64`)
+
+All results here are **stand-in results**. They do not establish PX4/Gazebo flight readiness.
+
+**Generator** (`SarStandInEnv(randomize_obstacles=True)`, opt-in):
+- **Draw:** 4–7 axis-aligned walls per episode, after the target and before the start. Each is 2.0–4.5 m long and 0.3 m thick (tall, so occlusion is 2D), with centres in NED x, y ∈ [−6.5, 3.5].
+- **Clearances:** ≥ 0.8 m from the whole start square [−1, 1]², ≥ 1.0 m from the target centre, and ≥ 1.2 m gap to every other wall. Separated convex obstacles cannot enclose a region, so the target is always reachable.
+- **Collision geometry:** the existing LiDAR proximity check (< 0.25 m).
+- **Independence:** placement is independent of the target except for its clearance. Line of sight is blocked in 12.5% of episodes, against 26.7% for a phantom target from the same sampler, so obstacles are *not* preferentially between start and target. Residual bias: the target clearance keeps targets in slightly more open space.
+- **Density:** an obstacle lies within 1 m of the straight path in about 33% of episodes. The first density setting (2–4 obstacles) gave only 4.7% blocked and was rejected as near-trivial before any training.
+- **Reproducibility:** layouts are recorded (`sampled_layouts.json`) and reproducible by seed.
+- **Fix `7b88a64`:** the generator could rarely fail to place an obstacle, which crashed seed 2 at about 60k steps. It now redraws the whole layout instead. This is verified identical to `505048d` over 3000 seeds wherever the old code succeeded, so seeds 1 and 3 are unaffected. The crashed partial run is kept in `E2O_s2/` with `CRASHED_README.txt`; seed 2 was rerun as `E2O_s2r`.
+- **Tests:** 11 in `test_randomized_obstacles.py`. Full suite: 315 passed.
+
+**Training:** `runs/rl/exp20261023_obstacles300k/`. `run_train.sh` with `CODE_REVISION` (505048d) for s1/s3 and `CODE_REVISION_s2r` (7b88a64) for s2r.
+- From scratch (random init), 300k steps, seeds 1/2/3.
+- E1R settings (progress weight 10, randomized target and start, unchanged PPO hyperparameters) plus `--camera-occlusion --randomize-obstacles` for training, best-model selection, and final evaluation.
+- Checkpoints: `E2O_s1/`, `E2O_s2r/`, `E2O_s3/` (`final_model.zip`, `best_model.zip`, `checkpoints/` every 10k).
+- 1673 / 1849 / 1561 training layouts.
+- Learning curves stayed noisy to 300k (s1 swings 41–95 after 200k, s2r ends at 28 after 95 at 200k, s3 58–95), unlike E1R's plateau at about 95.
+
+**Evaluation:** `evaluation/evaluate_obstacles.py`, `evaluation/evaluation.json`, `evaluation/trajectories/`.
+- **Occlusion on** for every policy and scenario. 50 episodes per cell; target i is paired with episode seed 10000+i.
+- **Scenarios:** the six earlier scenarios; `layout_twowall` (held-out hand design: interior walls (−2.4, −2.1, 0.5, 4.0) and (−4.9, −4.6, −4.0, −0.5), sampler targets ≥ 1 m clear, seed 20261023); and `gen_heldout` (50 generator layouts at episode seeds 10000–10049, disjoint from the training streams, asserted identical across policies and recorded).
+- **Policies:** baseline, E1R 300k ± filter, E2O 300k ± filter.
+
+Success / **collision** / timeout:
+
+| Policy | reference | region_W | region_S | region_SW | layout_open | layout_interior | layout_twowall | gen_heldout |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 0.88/0/0.12 | 0.80/0/0.20 | 0.76/0/0.24 |
+| E1R_s1 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 0.98/0/0.02 | 1.00/0/0.00 | 0.86/**0.14**/0.00 | 0.82/**0.04**/0.14 |
+| E1R_s1+filter | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 0.98/0/0.02 | 0.94/0/0.06 | 0.82/0/0.18 | 0.76/0/0.24 |
+| E1R_s2 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 0.88/**0.12**/0.00 | 0.86/**0.14**/0.00 | 0.82/**0.06**/0.12 |
+| E1R_s2+filter | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 0.96/0/0.04 | 0.86/0/0.14 | 0.72/0/0.28 |
+| E1R_s3 | 1.00/0/0.00 | 0.94/0/0.06 | 1.00/0/0.00 | 0.86/0/0.14 | 0.96/0/0.04 | 0.90/**0.02**/0.08 | 0.80/**0.08**/0.12 | 0.62/**0.24**/0.14 |
+| E1R_s3+filter | 0.98/0/0.02 | 0.94/0/0.06 | 1.00/0/0.00 | 0.86/0/0.14 | 0.96/0/0.04 | 0.90/0/0.10 | 0.84/0/0.16 | 0.72/0/0.28 |
+| E2O_s1 | 0.84/0/0.16 | 1.00/0/0.00 | 0.80/0/0.20 | 0.92/0/0.08 | 0.98/0/0.02 | 0.74/**0.06**/0.20 | 0.78/**0.04**/0.18 | 0.80/**0.04**/0.16 |
+| E2O_s1+filter | 0.84/0/0.16 | 1.00/0/0.00 | 0.82/0/0.18 | 0.92/0/0.08 | 0.98/0/0.02 | 0.72/0/0.28 | 0.78/0/0.22 | 0.76/0/0.24 |
+| E2O_s2 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 0.90/**0.06**/0.04 | 0.86/**0.08**/0.06 | 0.80/**0.06**/0.14 |
+| E2O_s2+filter | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 1.00/0/0.00 | 0.90/0/0.10 | 0.82/0/0.18 | 0.74/0/0.26 |
+| E2O_s3 | 1.00/0/0.00 | 1.00/0/0.00 | 0.64/0/0.36 | 0.66/0/0.34 | 0.00/0/1.00 | 0.92/0/0.08 | 0.82/**0.02**/0.16 | 0.80/**0.06**/0.14 |
+| E2O_s3+filter | 0.98/0/0.02 | 1.00/0/0.00 | 0.64/0/0.36 | 0.66/0/0.34 | 0.00/0/1.00 | 0.90/0/0.10 | 0.82/0/0.18 | 0.76/0/0.24 |
+
+Path length, episode length, return, interventions, and occluded frames per cell are in `evaluate_obstacles.out` and `evaluation.json`.
+
+**Confirmed findings:**
+- **E2O did not deliver reliable obstacle avoidance.** Unfiltered collision rates, E2O vs E1R per seed:
+  - interior wall: .06/.06/0 vs 0/.12/.02;
+  - two-wall: .04/.08/.02 vs .14/.14/.08;
+  - generated held-out layouts: .04/.06/.06 vs .04/.06/.24.
+
+  Collisions fall on the two-wall layout and for s3 on generated layouts, but none reach zero, and interior-wall s1 got worse.
+- **The safety filter still prevents every collision**, for E1R and E2O, in every scenario. It converts them into timeouts (for example gen_heldout E2O + filter: .76/.74/.76 success with .24/.26/.24 timeouts).
+- **Success on obstacle layouts:** E2O 0.80 / 0.80 / 0.80 against E1R 0.82 / 0.82 / 0.62 and the baseline 0.76.
+- **Regressions:** E2O s1 reference 0.84 (E1R 1.00); E2O s1 region_S 0.80; E2O s3 region_S/SW 0.64/0.66; **E2O s3 no-wall layout 0.00 (50/50 timeouts)**.
+- **Cause of every one of those regression failures (trajectories):** the final-approach failure. The target was detected and approached to 0.75–0.95 m, just outside the success radius and inside the camera's ~1.05 m near limit, then the vehicle circled (mean |turn| 0.6–0.98, speed ≤ 0.15) until timeout. E1R at 300k had overcome this; E2O, on a harder task, has not within the same 300k steps.
+
+**Hypotheses (not verified):**
+- E2O s3's total failure without walls suggests its final approach depends on LiDAR returns that were always present in training. The open layout is out of distribution for it.
+- E2O is under-trained (non-converged curves). Longer training might recover both the final approach and the avoidance, but this experiment does not show that.
+- The task geometry makes the final approach intrinsically hard. A 0.75 m success radius sits inside the camera's ~1.05 m blind range, so the last metres depend on the 8 s dead-reckoned estimate. Changing the task would require explicit approval.
+
+**Status:** the best stand-in configuration remains E1R 300k + the LiDAR safety filter: 0 collisions everywhere, 1.00 on open-space scenarios, 0.72–0.96 on obstacle layouts where it times out instead of colliding. None of this is validated in PX4/Gazebo, where the live episode is still blocked by the readiness gates.
