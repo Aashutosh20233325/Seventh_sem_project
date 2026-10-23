@@ -149,3 +149,27 @@ def test_training_with_obstacles_and_occlusion_records_layouts(tmp_path):
     assert config["camera_occlusion"] and config["randomize_obstacles"] and config["randomize_target"]
     layouts = json.loads((run_dir / "sampled_layouts.json").read_text())["per_env"]
     assert len(layouts) == 2 and all(layouts) and config["sampled_layout_count"] == sum(map(len, layouts))
+
+
+def test_layout_generation_never_fails_and_retries_whole_layouts(monkeypatch):
+    env = make()
+    for seed in range(20000):                                  # the training crash happened in ~1 of ~7000 resets
+        env.reset(seed=seed)
+    # Force the per-obstacle failure path: the first layout attempt fails, a later one must succeed.
+    calls = {"n": 0}
+    original = SarStandInEnv._valid_obstacle
+
+    def flaky(self, box, placed):
+        calls["n"] += 1
+        return False if calls["n"] <= 500 else original(self, box, placed)
+    monkeypatch.setattr(SarStandInEnv, "_valid_obstacle", flaky)
+    env.reset(seed=1)
+    assert len(env.obstacles) >= se.OBSTACLE_COUNT[0] and calls["n"] > 500
+
+
+def test_impossible_layouts_raise_instead_of_looping(monkeypatch):
+    env = make()
+    monkeypatch.setattr(SarStandInEnv, "_valid_obstacle", lambda self, box, placed: False)
+    monkeypatch.setattr(SarStandInEnv, "OBSTACLE_LAYOUT_TRIES", 3)
+    with pytest.raises(RuntimeError, match="layout"):
+        env.reset(seed=0)

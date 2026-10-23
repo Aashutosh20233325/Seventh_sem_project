@@ -295,30 +295,38 @@ class SarStandInEnv(gym.Env):
                 and box_distance(t.x_ned, t.y_ned, box) >= OBSTACLE_TARGET_CLEARANCE
                 and all(box_box_distance(box, w) >= OBSTACLE_GAP for w in self.base_walls + placed))
 
+    OBSTACLE_LAYOUT_TRIES = 100
+
     def _sample_obstacles(self):
         """Independent of the target except for target clearance. Separated convex obstacles cannot enclose
-        any region, so the target stays reachable."""
-        n = int(self.np_random.integers(OBSTACLE_COUNT[0], OBSTACLE_COUNT[1] + 1))
+        any region, so the target stays reachable. If an obstacle cannot be placed in 500 draws, the whole
+        layout (including its count) is redrawn; layouts that never fail consume the same random stream as
+        before this retry existed."""
         x0, x1, y0, y1 = OBSTACLE_CENTRE_REGION
-        placed = []
-        for _ in range(n):
-            for _ in range(500):
-                cx, cy = self.np_random.uniform(x0, x1), self.np_random.uniform(y0, y1)
-                half_len = 0.5 * self.np_random.uniform(*OBSTACLE_LENGTH)
-                half_t = 0.5 * OBSTACLE_THICKNESS
-                if self.np_random.random() < 0.5:                      # long along NED x
-                    box = (cx - half_len, cx + half_len, cy - half_t, cy + half_t)
-                else:                                                 # long along NED y
-                    box = (cx - half_t, cx + half_t, cy - half_len, cy + half_len)
-                box = tuple(float(v) for v in box)
-                if self._valid_obstacle(box, placed):
-                    placed.append(box)
-                    break
-            else:
-                raise RuntimeError("could not place an obstacle")
-        self.obstacles = placed
-        self.walls = list(self.base_walls) + placed
-        self.sampled_layouts.append({"target": (self.target.x_ned, self.target.y_ned), "obstacles": placed})
+        for _ in range(self.OBSTACLE_LAYOUT_TRIES):
+            n = int(self.np_random.integers(OBSTACLE_COUNT[0], OBSTACLE_COUNT[1] + 1))
+            placed = []
+            for _ in range(n):
+                for _ in range(500):
+                    cx, cy = self.np_random.uniform(x0, x1), self.np_random.uniform(y0, y1)
+                    half_len = 0.5 * self.np_random.uniform(*OBSTACLE_LENGTH)
+                    half_t = 0.5 * OBSTACLE_THICKNESS
+                    if self.np_random.random() < 0.5:                      # long along NED x
+                        box = (cx - half_len, cx + half_len, cy - half_t, cy + half_t)
+                    else:                                                 # long along NED y
+                        box = (cx - half_t, cx + half_t, cy - half_len, cy + half_len)
+                    box = tuple(float(v) for v in box)
+                    if self._valid_obstacle(box, placed):
+                        placed.append(box)
+                        break
+                else:
+                    break                                                 # redraw the whole layout
+            if len(placed) == n:
+                self.obstacles = placed
+                self.walls = list(self.base_walls) + placed
+                self.sampled_layouts.append({"target": (self.target.x_ned, self.target.y_ned), "obstacles": placed})
+                return
+        raise RuntimeError("could not place an obstacle layout")
 
     # ---------- start-state curriculum (training only) ----------
     START_CLEARANCE = 0.6        # m of LiDAR clearance required at a curriculum start
