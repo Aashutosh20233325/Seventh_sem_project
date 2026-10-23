@@ -82,10 +82,12 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
-def make_env(seed, randomize_start, monitor_dir=None, task_config=None, randomize_target=False):
+def make_env(seed, randomize_start, monitor_dir=None, task_config=None, randomize_target=False,
+             camera_occlusion=False, randomize_obstacles=False):
     def _init():
         env = SarStandInEnv(randomize_start=randomize_start, seed=seed, task_config=task_config,
-                            randomize_target=randomize_target)
+                            randomize_target=randomize_target, camera_occlusion=camera_occlusion,
+                            randomize_obstacles=randomize_obstacles)
         env = Monitor(env, str(monitor_dir / f"env_{seed}") if monitor_dir else None,
                       info_keywords=("reason",))
         env.reset(seed=seed)
@@ -116,6 +118,9 @@ def parse_args(argv=None):
     p.add_argument("--randomize-target", action="store_true",
                    help="new random target each episode (training, best-model selection and final evaluation; "
                         "held-out positions are never sampled)")
+    p.add_argument("--camera-occlusion", action="store_true", help="walls block the stand-in camera (all envs)")
+    p.add_argument("--randomize-obstacles", action="store_true",
+                   help="new random interior obstacles each episode (training, selection and final evaluation)")
     return p.parse_args(argv)
 
 
@@ -147,10 +152,14 @@ def main(argv=None):
     monitor_dir = run_dir / "monitor"
     monitor_dir.mkdir()
     config["randomize_target"] = args.randomize_target
+    config["camera_occlusion"] = args.camera_occlusion
+    config["randomize_obstacles"] = args.randomize_obstacles
+    env_flags = dict(randomize_target=args.randomize_target, camera_occlusion=args.camera_occlusion,
+                     randomize_obstacles=args.randomize_obstacles)
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
-    train_env = DummyVecEnv([make_env(args.seed + i, args.randomize_start, monitor_dir, train_config,
-                                      args.randomize_target) for i in range(args.n_envs)])
-    eval_env = DummyVecEnv([make_env(args.seed + 1000, args.randomize_start, randomize_target=args.randomize_target)])
+    train_env = DummyVecEnv([make_env(args.seed + i, args.randomize_start, monitor_dir, train_config, **env_flags)
+                             for i in range(args.n_envs)])
+    eval_env = DummyVecEnv([make_env(args.seed + 1000, args.randomize_start, **env_flags)])
     model = PPO(
         "MlpPolicy", train_env, n_steps=args.n_steps, batch_size=args.batch_size,
         learning_rate=args.learning_rate, gamma=args.gamma, seed=args.seed, device="cpu", verbose=0,
@@ -169,6 +178,10 @@ def main(argv=None):
         targets = train_env.get_attr("sampled_targets")
         (run_dir / "sampled_targets.json").write_text(json.dumps({"per_env": targets}) + "\n")
         config["sampled_target_count"] = sum(len(t) for t in targets)
+    if args.randomize_obstacles:
+        layouts = train_env.get_attr("sampled_layouts")
+        (run_dir / "sampled_layouts.json").write_text(json.dumps({"per_env": layouts}) + "\n")
+        config["sampled_layout_count"] = sum(len(v) for v in layouts)
     if curriculum is not None:
         config["curriculum_history"] = curriculum.history
 
@@ -179,7 +192,7 @@ def main(argv=None):
         policies["ppo_best"] = evaluate_policies.ppo_policy(run_dir / "best_model.zip")
     policies["baseline"] = evaluate_policies.baseline_policy()
     for name, (act, reset) in policies.items():
-        env = SarStandInEnv(randomize_start=args.randomize_start, randomize_target=args.randomize_target)
+        env = SarStandInEnv(randomize_start=args.randomize_start, **env_flags)
         summary[name] = evaluate_policies.summarize(
             evaluate_policies.run_episodes(act, reset, env, args.final_eval_episodes, 10_000))
     config["finished_utc"] = datetime.now(timezone.utc).isoformat()

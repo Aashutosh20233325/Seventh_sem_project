@@ -70,6 +70,22 @@ def valid_random_target(x, y, walls, held_out=HELD_OUT_TARGETS):
             and all(math.hypot(x - hx, y - hy) > HELD_OUT_RADIUS for hx, hy in held_out))
 
 
+# Randomized interior obstacles (offline training/evaluation only; opt-in). Thin, tall, axis-aligned walls
+# placed independently of the target (so the layout carries no cue about where the target is), subject to:
+OBSTACLE_COUNT = (4, 7)                 # inclusive range per episode
+OBSTACLE_LENGTH = (2.0, 4.5)            # m
+OBSTACLE_THICKNESS = 0.3                # m
+OBSTACLE_CENTRE_REGION = (-6.5, 3.5, -6.5, 3.5)   # NED x_min, x_max, y_min, y_max of obstacle centres
+OBSTACLE_START_CLEARANCE = 0.8          # m from the whole start square [-1, 1] x [-1, 1]
+OBSTACLE_TARGET_CLEARANCE = 1.0         # m from the target centre (same as fixed walls)
+OBSTACLE_GAP = 1.2                      # m minimum gap to any other wall: keeps passages open, no enclosures
+START_SQUARE = (-1.0, 1.0, -1.0, 1.0)
+
+
+def box_box_distance(a, b):
+    return math.hypot(max(a[0] - b[1], b[0] - a[1], 0.0), max(a[2] - b[3], b[2] - a[3], 0.0))
+
+
 def segment_hits_box(x0, y0, x1, y1, box):
     """True if the segment (x0, y0)-(x1, y1) touches the closed box (xmin, xmax, ymin, ymax). Slab method."""
     t0, t1 = 0.0, 1.0
@@ -136,7 +152,7 @@ class SarStandInEnv(gym.Env):
 
     def __init__(self, randomize_start=False, perception_noise=True, detection_prob=0.95,
                  perception_period_steps=2, perception_latency_steps=1, max_steps=None, seed=None,
-                 task_config=None, randomize_target=False, camera_occlusion=False):
+                 task_config=None, randomize_target=False, camera_occlusion=False, randomize_obstacles=False):
         super().__init__()
         self.action_space = spaces.Box(np.array([0.0, -1.0], np.float32), np.array([1.0, 1.0], np.float32))
         self.observation_space = spaces.Box(so.LOW, so.HIGH, dtype=np.float32)
@@ -147,7 +163,12 @@ class SarStandInEnv(gym.Env):
         self.start_range = None      # curriculum: (r_min, r_max, max_heading_error); None = default start
         self.nominal_target = sar_task.load_target()
         self.target = self.nominal_target
-        self.walls = load_walls()
+        self.base_walls = load_walls()
+        self.walls = list(self.base_walls)
+        # Opt-in: new interior obstacles each reset (see OBSTACLE_*). When off, reset never touches self.walls.
+        self.randomize_obstacles = randomize_obstacles
+        self.obstacles = []
+        self.sampled_layouts = []
         # Offline training only: a new collision-free target each reset (ground truth for reward, the camera
         # model, and evaluation; it never enters the observation). sampled_targets records every draw.
         self.randomize_target = randomize_target
@@ -236,6 +257,8 @@ class SarStandInEnv(gym.Env):
         self._initial_seed = None
         if self.randomize_target:
             self._sample_target()
+        if self.randomize_obstacles:
+            self._sample_obstacles()
         self.x, self.y, self.heading = 0.0, 0.0, math.pi / 2
         if self.start_range is not None:
             self._sample_curriculum_start()
@@ -265,6 +288,37 @@ class SarStandInEnv(gym.Env):
                 self.sampled_targets.append((self.target.x_ned, self.target.y_ned))
                 return
         raise RuntimeError("no valid random target found")
+
+    def _valid_obstacle(self, box, placed):
+        t = self.target
+        return (box_box_distance(box, START_SQUARE) >= OBSTACLE_START_CLEARANCE
+                and box_distance(t.x_ned, t.y_ned, box) >= OBSTACLE_TARGET_CLEARANCE
+                and all(box_box_distance(box, w) >= OBSTACLE_GAP for w in self.base_walls + placed))
+
+    def _sample_obstacles(self):
+        """Independent of the target except for target clearance. Separated convex obstacles cannot enclose
+        any region, so the target stays reachable."""
+        n = int(self.np_random.integers(OBSTACLE_COUNT[0], OBSTACLE_COUNT[1] + 1))
+        x0, x1, y0, y1 = OBSTACLE_CENTRE_REGION
+        placed = []
+        for _ in range(n):
+            for _ in range(500):
+                cx, cy = self.np_random.uniform(x0, x1), self.np_random.uniform(y0, y1)
+                half_len = 0.5 * self.np_random.uniform(*OBSTACLE_LENGTH)
+                half_t = 0.5 * OBSTACLE_THICKNESS
+                if self.np_random.random() < 0.5:                      # long along NED x
+                    box = (cx - half_len, cx + half_len, cy - half_t, cy + half_t)
+                else:                                                 # long along NED y
+                    box = (cx - half_t, cx + half_t, cy - half_len, cy + half_len)
+                box = tuple(float(v) for v in box)
+                if self._valid_obstacle(box, placed):
+                    placed.append(box)
+                    break
+            else:
+                raise RuntimeError("could not place an obstacle")
+        self.obstacles = placed
+        self.walls = list(self.base_walls) + placed
+        self.sampled_layouts.append({"target": (self.target.x_ned, self.target.y_ned), "obstacles": placed})
 
     # ---------- start-state curriculum (training only) ----------
     START_CLEARANCE = 0.6        # m of LiDAR clearance required at a curriculum start
