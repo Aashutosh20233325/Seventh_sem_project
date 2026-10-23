@@ -246,3 +246,30 @@ Interventions (mean per episode / episodes with any, of 50):
   - The 1.2 m stop distance and 0.5 m emergency margin are the baseline's and have not been validated against PX4 braking in SITL.
   - Stale and invalid LiDAR handling is unit-tested only.
   - The filter is not wired into the live env or the flight runner.
+
+## Camera occlusion (stand-in; code `dd9924d`) and re-evaluation of the 300k policies
+
+All results in this section are **stand-in results only**. They say nothing about PX4/Gazebo flight readiness.
+
+**Model:** `SarStandInEnv(camera_occlusion=True)`. After the field-of-view check, the target is undetectable when all three sightlines from the camera (body x offset 0.19 m) cross a wall box: to the target centre, and to both horizontal edges (offset by the 0.5 m radius perpendicular to the line of sight). This is a 2D test; walls are modelled as taller than the camera, which holds for the world's 15 m walls against a 1.87 m camera. A partly visible target stays detectable. The option is off by default. 20 tests cover geometry edge cases, blocked/clear/re-visible, partial visibility, determinism, exact reproduction when off, and no leakage. Full suite: 304 passed.
+
+**Evaluation:** `runs/rl/exp20261023_occlusion_eval/`. Occlusion on, the same six scenarios, targets, and seeds as the safety-filter evaluation, 7 policies × 50 episodes. Occluded-frame counts and path lengths are recorded per episode.
+- **Occlusion acted only where intended.** It triggered in 0 episodes in the reference, held-out-region, and open scenarios, which reproduce the no-occlusion evaluation episode for episode (35/35 cells identical). In the interior-wall layout it triggered in 2–6 of 50 episodes, and only those cells changed.
+
+Interior-wall layout, success / collision / timeout, without → with occlusion:
+
+| | Without | With occlusion |
+|---|---|---|
+| Baseline | .88/0/.12 | .88/0/.12 (5 episodes changed internally; same totals) |
+| s1 | .94/.06/0 | **1.00/0/0** |
+| s1 + filter | .94/0/.06 | .94/0/.06 |
+| s2 | .86/.14/0 | .88/**.12**/0 |
+| s2 + filter | .92/0/.08 | .96/0/.04 |
+| s3 | .90/.10/0 | .90/.02/.08 |
+| s3 + filter | .92/0/.08 | .90/0/.10 |
+
+**Per-episode diagnosis (trajectories):**
+- **s1:** its 3 former collisions became successes. With the target hidden, it stopped being pulled straight into the wall, then saw the target around the wall's end.
+- **s3:** 4 former collisions became timeouts with **0 detections**. The target stayed hidden and its search never found it.
+- **s2 still collides in 6 episodes.** Two of them had 0–1 occluded frames: the target was visible past the wall's end, and the vehicle cut the corner into the wall. The others had short detections followed by a direct approach into the wall.
+- **Conclusion (confirmed):** occlusion removes the see-through artefact. The remaining collisions show that the 300k policies lack obstacle avoidance independently of the camera model. The safety filter still prevents every collision.
