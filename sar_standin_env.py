@@ -70,6 +70,23 @@ def valid_random_target(x, y, walls, held_out=HELD_OUT_TARGETS):
             and all(math.hypot(x - hx, y - hy) > HELD_OUT_RADIUS for hx, hy in held_out))
 
 
+def segment_hits_box(x0, y0, x1, y1, box):
+    """True if the segment (x0, y0)-(x1, y1) touches the closed box (xmin, xmax, ymin, ymax). Slab method."""
+    t0, t1 = 0.0, 1.0
+    for p0, d, lo, hi in ((x0, x1 - x0, box[0], box[1]), (y0, y1 - y0, box[2], box[3])):
+        if abs(d) < 1e-12:
+            if p0 < lo or p0 > hi:
+                return False
+            continue
+        ta, tb = (lo - p0) / d, (hi - p0) / d
+        if ta > tb:
+            ta, tb = tb, ta
+        t0, t1 = max(t0, ta), min(t1, tb)
+        if t0 > t1:
+            return False
+    return True
+
+
 def load_walls(world_sdf=sar_task.WORLD_SDF):
     """Wall boxes as NED rectangles (xmin, xmax, ymin, ymax)."""
     walls = []
@@ -119,7 +136,7 @@ class SarStandInEnv(gym.Env):
 
     def __init__(self, randomize_start=False, perception_noise=True, detection_prob=0.95,
                  perception_period_steps=2, perception_latency_steps=1, max_steps=None, seed=None,
-                 task_config=None, randomize_target=False):
+                 task_config=None, randomize_target=False, camera_occlusion=False):
         super().__init__()
         self.action_space = spaces.Box(np.array([0.0, -1.0], np.float32), np.array([1.0, 1.0], np.float32))
         self.observation_space = spaces.Box(so.LOW, so.HIGH, dtype=np.float32)
@@ -135,6 +152,10 @@ class SarStandInEnv(gym.Env):
         # model, and evaluation; it never enters the observation). sampled_targets records every draw.
         self.randomize_target = randomize_target
         self.sampled_targets = []
+        # Opt-in: walls block the camera's view of the target (all walls are modelled as taller than the camera,
+        # true for the world's 15 m walls, so the test is 2D). Default off keeps earlier results reproducible.
+        self.camera_occlusion = camera_occlusion
+        self.occluded_frames = 0       # diagnostics only: in-FOV frames suppressed by occlusion this episode
         self.randomize_start = randomize_start
         self.perception_noise = perception_noise
         self.detection_prob = detection_prob
@@ -171,10 +192,33 @@ class SarStandInEnv(gym.Env):
         depression = math.atan2(height, horiz)
         return abs(depression - CAM_PITCH) <= CAM_HALF_VFOV + ang_r
 
+    def _camera_xy(self):
+        offset = float(tp.CAMERA_IN_BODY[0])
+        return self.x + offset * math.cos(self.heading), self.y + offset * math.sin(self.heading)
+
+    def _occluded(self):
+        """True if every sightline from the camera to the target (centre and both horizontal edges, offset by
+        the target radius perpendicular to the line of sight) crosses a wall. A partly visible target is
+        detectable."""
+        cx, cy = self._camera_xy()
+        tx, ty = self.target.x_ned, self.target.y_ned
+        d = math.hypot(tx - cx, ty - cy)
+        if d < 1e-9:
+            return False
+        px, py = -(ty - cy) / d * self.target.radius, (tx - cx) / d * self.target.radius
+        for ex, ey in ((tx, ty), (tx + px, ty + py), (tx - px, ty - py)):
+            if not any(segment_hits_box(cx, cy, ex, ey, w) for w in self.walls):
+                return False
+        return True
+
     def _perceive(self):
         bearing, rng = self._true_relative()
         stamp = self.steps * DT
-        if not self._camera_sees(bearing, rng) or self.np_random.random() > self.detection_prob:
+        visible = self._camera_sees(bearing, rng)
+        if visible and self.camera_occlusion and self._occluded():
+            visible = False
+            self.occluded_frames += 1
+        if not visible or self.np_random.random() > self.detection_prob:
             return {"detected": False, "range_valid": False, "bearing": math.nan,
                     "horizontal_range": math.nan, "image_stamp": stamp}
         if self.perception_noise:
@@ -207,6 +251,7 @@ class SarStandInEnv(gym.Env):
         self.latest = None
         self.latest_step = None
         self.builder.reset()
+        self.occluded_frames = 0
         self._schedule_perception()
         sectors = self._lidar()
         return self._observe(sectors), {"privileged": self._privileged()}
