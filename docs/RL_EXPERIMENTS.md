@@ -292,7 +292,7 @@ All results here are **stand-in results**. They do not establish PX4/Gazebo flig
 - From scratch (random init), 300k steps, seeds 1/2/3.
 - E1R settings (progress weight 10, randomized target and start, unchanged PPO hyperparameters) plus `--camera-occlusion --randomize-obstacles` for training, best-model selection, and final evaluation.
 - Checkpoints: `E2O_s1/`, `E2O_s2r/`, `E2O_s3/` (`final_model.zip`, `best_model.zip`, `checkpoints/` every 10k).
-- 1673 / 1849 / 1561 training layouts.
+- 1673 / 1849 / 1876 training layouts.
 - Learning curves stayed noisy to 300k (s1 swings 41–95 after 200k, s2r ends at 28 after 95 at 200k, s3 58–95), unlike E1R's plateau at about 95.
 
 **Evaluation:** `evaluation/evaluate_obstacles.py`, `evaluation/evaluation.json`, `evaluation/trajectories/`.
