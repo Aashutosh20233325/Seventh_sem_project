@@ -32,7 +32,7 @@ The runner has **no PPO path**. Flying a PPO checkpoint live would be a new, sep
 | `--software-rendering` (launcher flag, reversible) | Measured 2026-10-18: memory flat but **~0.17×**, so the gate fails. Diagnostic only. |
 | `--px4-server-config` (restores GstCameraSystem) | Adds load; diagnostic only. |
 | `HEADLESS=1` (PX4-supported; not exposed by the launcher) | Removes the GUI, which is about two thirds of the leak plus its GPU rendering. Previously authorized for diagnosis only, and a headless run is not a visible demo. |
-| GUI on llvmpipe, server on D3D12 ("split rendering") | **Not implemented.** PX4 starts server and GUI from the same `gz_env.sh`, so this needs a launcher option (`HEADLESS=1` for PX4 plus an owned `gz sim -g` started with software rendering). Expected to remove the GUI leak and free GPU time for the cameras; the speed effect is **unmeasured**. Needs approval and one no-flight readiness run. |
+| GUI on llvmpipe, server on D3D12 ("split rendering") | **Implemented, untested live** (`b9b4588`): `start --split-rendering`. PX4 runs with `HEADLESS=1` (server only, still d3d12 from `gz_env.sh`); the launcher starts and records `gz_gui` from `gz_gui_env.sh` (llvmpipe). Expected to remove the GUI's ~80 MiB/min leak and free GPU time for the cameras; the speed effect is **unmeasured**. Next: one no-flight readiness run (needs approval). |
 
 None of these change `.wslconfig`, Mesa, packages, PX4 parameters, or gates.
 
@@ -51,10 +51,18 @@ export ROS_DOMAIN_ID=43 GZ_PARTITION=uav_sar_validation_20261018_instance1 \
 .venv/bin/python -u tools/telemetry_recorder.py runs/sar_demo_20261018/restart_<...>/logs/telemetry_full.jsonl 3600 &
 ```
 
+Split-rendering variant (readiness candidate, `b9b4588`): add `--split-rendering` to the `start` command. Then verify
+the renderers per process (read-only; do not use the shared `~/.gz/rendering/ogre2.log`):
+
+```bash
+.venv/bin/python tools/isolated_sitl.py render-check --run-dir runs/sar_demo_20261018/restart_<...>   # exit 0 = server d3d12 + GUI llvmpipe
+```
+
 **Expected:**
 - A Gazebo GUI window (`gz sim -g`) showing the walls world, the x500 on the ground at the world origin (PX4 local origin within ~5 cm), and the red sphere at ENU (3, −3), about 4.2 m away. Screenshots from earlier runs: `runs/sar_demo_20261018/restart_20261018_oakd3_gpu/logs/gui_after_d3d12.png`.
 - `~/.gz/rendering/ogre2.log` reports `GL_RENDERER = D3D12 (NVIDIA GeForce RTX 3050 Laptop GPU)`.
 - No `llvmpipe` threads in the gz server.
+- With `--split-rendering`: `render-check` reports the server with `d3d12_mapped: true` and 0 llvmpipe threads, and the GUI with `d3d12_mapped: false` and >0 llvmpipe threads. The GUI view may not auto-follow the drone (PX4's follow message is sent before the launcher's GUI exists); use the GUI's own follow control if needed.
 
 ## Readiness gates (all must pass; abort on any failure)
 
