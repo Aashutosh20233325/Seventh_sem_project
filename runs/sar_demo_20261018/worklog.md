@@ -466,3 +466,29 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - **Not exercised live:** the stale, gap, and missing paths (unit-tested only), and in-episode behavior.
 - **Stop:** gated stop attempt 1 at 05:45:07. The gate passed (status 0.56 s, land 0.19 s old; disarmed, landed, at rest). Only manifest-owned groups were stopped, and the recorder was stopped with SIGINT. Afterwards no stack processes remained, and 2.7 GB was available.
 - **Outcome:** no arming, take-off, flight command, or episode. The live episode is blocked by the speed gate and the memory start threshold while the gz GUI runs on D3D12. No gate was changed. QGroundControl (58699) is still running. Logs: `runs/sar_demo_20261018/restart_20261022_preflight1/logs/`.
+
+## Split-rendering no-flight readiness run: FAILED at the renderer gate (checker bug), stack stopped — 2026-10-23 17:01–17:02 UTC
+
+- **Code:** `master` at `74f783b` (split rendering `b9b4588`). Run `restart_20261023_split1`, `start --profile sar_oakd --split-rendering`. Orchestration is a copy of the 2026-10-22 script, `/home/hp/uav_ros_experiments/preflight_split_20261023/run_preflight_split.sh`; the original is unchanged and an identical copy is kept beside it.
+- **Pre-state:** only QGroundControl was running; domain 43 had no nodes, the gz partition was empty, UDP 18890 was free, and 2615 MiB was available.
+- **Gates:**
+  - `verify_isolated_topics` PASS (attempt 2): disarmed, nav 4, no failsafe, preflight true, GCS connected, landed/at_rest, 49 sectors.
+  - `verify_world_target` PASS.
+  - `/fmu/in` publishers 0/0/0.
+  - **`render-check` FAIL:** it found no gz processes. Cause: gz rewrites its process title, so `/proc/<pid>/cmdline` is one space-joined string padded with NULs (`gz sim --verbose=1 -r -s …`), which the parser (and its tests) did not expect. A checker bug, not an isolation failure.
+  - Per the script, the stability windows were skipped; **camera speed was not measured**.
+- **Manual renderer verification (read-only /proc):**
+
+| Process | libd3d12 mapped | llvmpipe threads | Environment |
+|---|---|---|---|
+| gz server, pid 111229 (PX4 group) | 8 | 0 | `GALLIUM_DRIVER=d3d12`, `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`, `HEADLESS=1` |
+| gz GUI, pid 111285 (launcher-owned `gz_gui`) | 0 | 16 | `GALLIUM_DRIVER=llvmpipe` |
+
+  PX4's log has no "Starting gz gui" line. **The isolation works as designed.**
+- **GUI:** 3 `/gui/*` topics; the screenshot `logs/gui_after_start.png` shows the walls, the x500, and the red sphere. PX4 logged "Camera follow offset set to -2.0, -2.0, 2.0" before the launcher's GUI started. The screenshot is a wide default view, so follow was probably not applied (cannot be confirmed on the ground).
+- **Memory** (`preflight_split_20261023/restart_20261023_split1_mem.txt`):
+  - MemAvailable was 2615 MiB before start, 1195 MiB at +30 s, and **1118 MiB minimum** at +60 s. Swap was flat (285–287 MiB).
+  - The GUI on llvmpipe used **~830 MiB RSS** (GPU GUI on 2026-10-22: 591 MiB), roughly flat over ~50 s. The server grew 551 → 557 MiB.
+  - **Consequence:** under split rendering, MemAvailable is below the runtime guard's 1.2 GiB start threshold within ~30 s of start, so `guard_refuse` would trigger independently of speed. The threshold is unchanged.
+- **Stop:** gated stop attempt 1 PASS (status 0.90 s, land 1.77 s; disarmed, landed, at rest), manifest `stopped_at_utc` 17:02:26. Afterwards there were no stack processes and 2545 MiB was available. QGroundControl (58699) is still running.
+- **Outcome:** no arming, take-off, flight command, or episode.
