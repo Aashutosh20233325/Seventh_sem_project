@@ -61,6 +61,12 @@ CAMERA_RGB_TOPIC = "/uav/camera/rgb/image"
 CAMERA_RGB_INFO_TOPIC = "/uav/camera/rgb/camera_info"
 CAMERA_DEPTH_TOPIC = "/uav/camera/depth/image"
 CAMERA_DEPTH_INFO_TOPIC = "/uav/camera/depth/camera_info"
+# Split rendering (opt-in): PX4 starts only the gz server (HEADLESS=1; px4-rc.gzsim gates nothing else on it),
+# which keeps gz_env.sh's d3d12/NVIDIA selection; this launcher starts the GUI itself, as a recorded owned process,
+# from a separate env file that pins Mesa llvmpipe. PX4's one-off /gui/track follow message is published
+# before that GUI exists, so the view may not auto-follow the vehicle.
+GUI_ENV_FILE = "gz_gui_env.sh"
+GL_SELECTION_VARS = ("GALLIUM_DRIVER", "MESA_D3D12_DEFAULT_ADAPTER_NAME", "LIBGL_ALWAYS_SOFTWARE")
 
 
 class Profile:
@@ -164,7 +170,9 @@ def px4_command(run_dir: Path) -> list[str]:
     ]
 
 
-def px4_environment(base: dict[str, str], profile: Profile = LEGACY) -> dict[str, str]:
+def px4_environment(
+    base: dict[str, str], profile: Profile = LEGACY, split_rendering: bool = False
+) -> dict[str, str]:
     env = dict(base)
     env.update(
         {
@@ -182,6 +190,8 @@ def px4_environment(base: dict[str, str], profile: Profile = LEGACY) -> dict[str
     if profile.autostart is not None:
         # The combined model has no PX4 airframe file of its own.
         env["PX4_SYS_AUTOSTART"] = str(profile.autostart)
+    if split_rendering:
+        env["HEADLESS"] = "1"          # px4-rc.gzsim: start the gz server only; the launcher owns the GUI
     return env
 
 
@@ -233,6 +243,25 @@ def gz_env_script(
         # adapter gives GL 4.6 core (probe, 2026-10-18).
         override += "export GALLIUM_DRIVER=d3d12\nexport MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA\n"
     return script + override.encode()
+
+
+def gz_gui_env_script(profile: Profile, px4_server_config: bool = False) -> bytes:
+    """Split rendering: the server's gz_env.sh content without the d3d12 lines, pinned to llvmpipe."""
+    return gz_env_script(profile, px4_server_config, software_rendering=True) + (
+        "\n# --- split rendering: this file is sourced only by the launcher-owned gz GUI ---\n"
+        "export GALLIUM_DRIVER=llvmpipe\nunset MESA_D3D12_DEFAULT_ADAPTER_NAME\nunset LIBGL_ALWAYS_SOFTWARE\n"
+    ).encode()
+
+
+def gui_command(run_dir: Path) -> list[str]:
+    """The GUI half of px4-rc.gzsim (`gz sim -g`), after sourcing the GUI-only env file."""
+    return ["bash", "-c", f". {shlex.quote(str(run_dir / GUI_ENV_FILE))} && exec gz sim -g"]
+
+
+def gui_environment(base: dict[str, str]) -> dict[str, str]:
+    env = {k: v for k, v in base.items() if k not in GL_SELECTION_VARS and k != "HEADLESS"}
+    env["GZ_PARTITION"] = GZ_PARTITION
+    return env
 
 
 def _proc_start_time(pid: int) -> int | None:
@@ -380,6 +409,7 @@ def _prepare_run_dir(
     profile: Profile = LEGACY,
     px4_server_config: bool = False,
     software_rendering: bool = False,
+    split_rendering: bool = False,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
     rootfs = run_dir / "px4_rootfs"
@@ -389,6 +419,8 @@ def _prepare_run_dir(
     (rootfs / "gz_env.sh").write_bytes(
         gz_env_script(profile, px4_server_config, software_rendering)
     )
+    if split_rendering:
+        (run_dir / GUI_ENV_FILE).write_bytes(gz_gui_env_script(profile, px4_server_config))
     (run_dir / "logs").mkdir()
 
 
@@ -471,14 +503,20 @@ def start(
     profile: Profile = LEGACY,
     px4_server_config: bool = False,
     software_rendering: bool = False,
+    split_rendering: bool = False,
 ) -> None:
+    if split_rendering and (not profile.camera or software_rendering):
+        raise IsolationError(
+            "--split-rendering needs a camera profile with GPU server rendering "
+            "(not the legacy profile, not --software-rendering)"
+        )
     run_dir = run_dir.resolve()
     _check_paths(run_dir, profile)
     _assert_endpoint_free(XRCE_PORT)
     env_base = sourced_environment()
     env_ros = ros_environment(env_base, profile=profile)
     _assert_domain_and_partition_unused(env_ros)
-    _prepare_run_dir(run_dir, profile, px4_server_config, software_rendering)
+    _prepare_run_dir(run_dir, profile, px4_server_config, software_rendering, split_rendering)
 
     manifest: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -496,7 +534,9 @@ def start(
             else "PX4 default (gz_env.sh)"
         ),
         "gz_rendering": (
-            "Mesa d3d12 (NVIDIA adapter)"
+            "server: Mesa d3d12 (NVIDIA adapter); GUI: Mesa llvmpipe (split rendering, launcher-owned gz_gui)"
+            if split_rendering
+            else "Mesa d3d12 (NVIDIA adapter)"
             if profile.camera and not software_rendering
             else "Mesa default (llvmpipe under WSLg)"
         ),
@@ -504,6 +544,8 @@ def start(
         "model": profile.sim_model,
         "components": {},
     }
+    if split_rendering:
+        manifest["gz_gui"] = "launcher-owned component gz_gui (PX4 started with HEADLESS=1)"
     _write_manifest(run_dir, manifest)
 
     try:
@@ -524,7 +566,7 @@ def start(
             run_dir,
             "px4_gazebo",
             px4_command(run_dir),
-            px4_environment(env_base, profile),
+            px4_environment(env_base, profile, split_rendering),
             run_dir / "px4_rootfs",
         )
         manifest["components"]["px4_gazebo"] = px4
@@ -548,6 +590,14 @@ def start(
                     break
         else:
             raise IsolationError("Isolated Gazebo world did not publish its clock within 30s")
+
+        if split_rendering:
+            gui = _spawn(run_dir, "gz_gui", gui_command(run_dir), gui_environment(env_base), run_dir)
+            manifest["components"]["gz_gui"] = gui
+            _write_manifest(run_dir, manifest)
+            time.sleep(1.0)
+            if _proc_start_time(gui["child_pid"]) != gui["child_start_time"]:
+                raise IsolationError("Launcher-owned gz GUI exited during startup; see gz_gui.log")
 
         bridge = _spawn(
             run_dir,
@@ -700,10 +750,65 @@ def cleanup_failed_start(run_dir: Path) -> None:
     print("Verified PX4 never started; only manifest-owned partial-start groups were stopped.")
 
 
+def _maps_contains(pid: int, needle: str) -> bool | None:
+    try:
+        return needle in Path(f"/proc/{pid}/maps").read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def _thread_names(pid: int) -> list[str] | None:
+    try:
+        return [t.joinpath("comm").read_text().strip() for t in Path(f"/proc/{pid}/task").iterdir()]
+    except OSError:
+        return None
+
+
+def _gz_processes(pgid: int) -> dict[str, int]:
+    """gz sim server (-s) and GUI (-g) processes inside one owned process group."""
+    candidates: dict[str, list[int]] = {}
+    for pid in _live_group_members(pgid):
+        cmd = _cmdline(pid) or []
+        if len(cmd) >= 2 and Path(cmd[0]).name in ("gz", "ruby") and "sim" in cmd:
+            role = "server" if "-s" in cmd else "gui" if "-g" in cmd else None
+            if role:
+                candidates.setdefault(role, []).append(pid)
+    # If a wrapper and the renderer share a command line, the renderer is the one with the most threads.
+    return {role: max(pids, key=lambda p: len(_thread_names(p) or [])) for role, pids in candidates.items()}
+
+
+def render_report(run_dir: Path) -> dict[str, Any]:
+    """Read-only: which renderer each gz process actually loaded (libd3d12 mapped, llvmpipe threads)."""
+    manifest = _load_manifest(run_dir)
+    components = manifest.get("components", {})
+    procs: dict[str, int] = {}
+    for name in ("px4_gazebo", "gz_gui"):
+        record = components.get(name)
+        if isinstance(record, dict) and _verified_record(record):
+            procs.update(_gz_processes(int(record["pgid"])))
+    report: dict[str, Any] = {"gz_rendering": manifest.get("gz_rendering"), "processes": {}}
+    for role, pid in sorted(procs.items()):
+        threads = _thread_names(pid)
+        report["processes"][role] = {
+            "pid": pid,
+            "d3d12_mapped": _maps_contains(pid, "libd3d12"),
+            "llvmpipe_threads": None if threads is None else sum(t.startswith("llvmpipe") for t in threads),
+        }
+    server, gui = report["processes"].get("server"), report["processes"].get("gui")
+    split = "split rendering" in str(manifest.get("gz_rendering"))
+    gpu_server = bool(server and server["d3d12_mapped"] and server["llvmpipe_threads"] == 0)
+    if split:
+        cpu_gui = bool(gui and not gui["d3d12_mapped"] and (gui["llvmpipe_threads"] or 0) > 0)
+        report["ok"] = gpu_server and cpu_gui
+    else:
+        report["ok"] = gpu_server if "d3d12" in str(manifest.get("gz_rendering")) else server is not None
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("start", "status", "stop", "cleanup-failed-start")
+        "command", choices=("start", "status", "stop", "cleanup-failed-start", "render-check")
     )
     parser.add_argument("--run-dir", type=Path, default=RUN_DIR)
     parser.add_argument(
@@ -724,6 +829,12 @@ def main(argv: list[str] | None = None) -> int:
         help="start only: do not select Mesa d3d12/NVIDIA for the camera profile "
         "(reverts to the default llvmpipe CPU renderer)",
     )
+    parser.add_argument(
+        "--split-rendering",
+        action="store_true",
+        help="start only (camera profile): gz server and cameras on Mesa d3d12/NVIDIA; the gz GUI "
+        "runs as a separate launcher-owned process on Mesa llvmpipe (PX4 started with HEADLESS=1)",
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "start":
@@ -732,11 +843,16 @@ def main(argv: list[str] | None = None) -> int:
                 PROFILES[args.profile],
                 args.px4_server_config,
                 args.software_rendering,
+                args.split_rendering,
             )
         elif args.command == "status":
             status(args.run_dir)
         elif args.command == "stop":
             stop(args.run_dir)
+        elif args.command == "render-check":
+            report = render_report(args.run_dir)
+            print(json.dumps(report, indent=2))
+            return 0 if report["ok"] else 1
         else:
             cleanup_failed_start(args.run_dir)
     except (IsolationError, OSError, subprocess.SubprocessError) as exc:
