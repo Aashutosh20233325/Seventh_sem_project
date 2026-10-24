@@ -50,7 +50,7 @@ class Feed:
 
     def __init__(self, clock):
         self.clock = clock
-        self.latest = {"px4": None, "camera": None}
+        self.latest = {"px4": None, "camera": None, "px4_link": None}
         self.sim = {"px4": 0.0, "camera": 100.0}
 
     def __call__(self):
@@ -63,6 +63,8 @@ class Feed:
                 self.sim[name] += rate * period
                 if alive:
                     self.latest[name] = (self.sim[name], self.clock.t)
+            if px4:                                             # PX4 local-position receipt (liveness)
+                self.latest["px4_link"] = self.clock.t
             guard.sample()
 
 
@@ -145,7 +147,9 @@ def test_guard_stale_clock_aborts_even_with_a_good_history(stream):
     feed.run(guard, 30)
     feed.run(guard, 2, **{stream: False})                   # the stream stops; the other keeps going
     verdict = guard.check()
-    assert not verdict["ok"] and verdict["reason"] == f"{stream}_clock_stale"
+    # PX4 data stopping entirely is first a PX4 link loss (local-position receipt > 1.0 s).
+    expected = "px4_telemetry_stale" if stream == "px4" else "camera_clock_stale"
+    assert not verdict["ok"] and verdict["reason"] == expected
     assert verdict["speed"] is None
 
 
@@ -156,6 +160,7 @@ def test_guard_repeated_stale_value_is_not_resampled_as_new():
     for _ in range(5):
         clock.t += 1.0
         feed.latest["px4"] = (feed.sim["px4"] + 0.4, clock.t)
+        feed.latest["px4_link"] = clock.t
         guard.sample()                                       # camera value unchanged
     assert len(guard.samples["camera"]) == count
     assert guard.check()["reason"] == "camera_clock_stale"

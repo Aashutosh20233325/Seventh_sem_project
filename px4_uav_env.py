@@ -1,5 +1,6 @@
 import dataclasses
 import math
+import os
 import threading
 import time
 import warnings
@@ -15,8 +16,10 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
     DurabilityPolicy,
+    qos_profile_sensor_data,
 )
 
+from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Float32MultiArray, Float64MultiArray
 
 from px4_msgs.msg import (
@@ -40,6 +43,8 @@ import target_perception
 VEHICLE_COMMAND_ACK_TOPIC = "/fmu/out/vehicle_command_ack_v1"
 LIDAR_SECTORS_TOPIC = "/uav/lidar_sectors"
 TARGET_PERCEPTION_TOPIC = "/uav/target_perception"
+# RGB camera_info header stamps are Gazebo simulation time; they time action steps.
+CAMERA_RGB_INFO_TOPIC = os.environ.get("SAR_CAMERA_RGB_INFO_TOPIC", "/uav/camera/rgb/camera_info")
 
 
 class PX4ControllerNode(Node):
@@ -53,7 +58,14 @@ class PX4ControllerNode(Node):
     CARROT_DISTANCE = 0.8
     # Position-message stamp increments larger than this are XRCE time-offset
     # resyncs, not simulation progress, and are not added to the sim clock.
+    # This position-stamp clock (sim_clock_us) is not used for timing or by the
+    # runtime guard: PX4 slews these DDS stamps toward wall time after each
+    # timesync reset, so it runs fast. It is kept only as a diagnostic.
     SIM_CLOCK_MAX_INCREMENT_US = 200_000
+    # The camera clock is invalidated (fail closed) by a forward jump larger than
+    # this between consecutive RGB frames (30 Hz sensor: 33 ms; frame-skipping
+    # perception stamps never exceeded 0.4 s in the recorded runs).
+    CAMERA_CLOCK_MAX_FRAME_GAP_US = 500_000
 
     def __init__(self, env):
 
@@ -146,6 +158,15 @@ class PX4ControllerNode(Node):
             qos,
         )
 
+        # Best-effort (sensor-data) QoS matches the bridge's camera_info publisher
+        # whatever its reliability; the perception node uses the same profile.
+        self.camera_info_sub = self.create_subscription(
+            CameraInfo,
+            CAMERA_RGB_INFO_TOPIC,
+            self.camera_info_callback,
+            qos_profile_sensor_data,
+        )
+
         self.land_detected_sub = self.create_subscription(
             VehicleLandDetected,
             "/fmu/out/vehicle_land_detected",
@@ -183,9 +204,14 @@ class PX4ControllerNode(Node):
         self.perception_received_at = None
         self.px4_sim_time_us = None
         self.px4_sim_time_received_at = None
-        # Fine-grained simulation clock accumulated from local-position stamps.
+        # Position-stamp clock: diagnostic only (see SIM_CLOCK_MAX_INCREMENT_US).
         self.sim_clock_us = None
         self._last_position_stamp = None
+        # Action-step clock: Gazebo time from RGB camera_info stamps.
+        self.camera_clock_us = None
+        self.camera_clock_received_at = None
+        self.camera_clock_samples = 0
+        self.camera_clock_invalid = None   # reason string once invalidated; sticky until reset
         self.hold_z = self.TAKEOFF_TARGET_Z
         self.goal = None              # (x, y, z, yaw) NED for the REPOSITION phase
 
@@ -292,6 +318,51 @@ class PX4ControllerNode(Node):
         increment = stamp_us - previous
         if 0 < increment <= self.SIM_CLOCK_MAX_INCREMENT_US:
             self.sim_clock_us += increment
+
+    def camera_info_callback(self, msg):
+        stamp = msg.header.stamp
+        stamp_us = int(stamp.sec) * 1_000_000 + int(stamp.nanosec) // 1_000
+        with self.condition:
+            self._advance_camera_clock(stamp_us, time.monotonic())
+            self.condition.notify_all()
+
+    def _advance_camera_clock(self, stamp_us, received_at):
+        """Advance the action clock; never from wall time, and fail closed on any discontinuity.
+
+        Duplicates are ignored (no progress, freshness not refreshed). A backward stamp
+        (e.g. a simulation reset) or a forward jump above CAMERA_CLOCK_MAX_FRAME_GAP_US
+        invalidates the clock until reset_camera_clock(), which only a new env.reset() calls.
+        """
+        if self.camera_clock_invalid is not None:
+            return
+        if self.camera_clock_us is None:
+            self.camera_clock_us = stamp_us
+            self.camera_clock_received_at = received_at
+            self.camera_clock_samples = 1
+            return
+        increment = stamp_us - self.camera_clock_us
+        if increment == 0:
+            return
+        if increment < 0:
+            self.camera_clock_invalid = (
+                f"camera stamp moved backwards by {-increment} us (simulation reset?)"
+            )
+            return
+        if increment > self.CAMERA_CLOCK_MAX_FRAME_GAP_US:
+            self.camera_clock_invalid = (
+                f"camera stamp jumped forward {increment} us between frames"
+            )
+            return
+        self.camera_clock_us = stamp_us
+        self.camera_clock_received_at = received_at
+        self.camera_clock_samples += 1
+
+    def reset_camera_clock(self):
+        """Forget the clock (caller holds the condition); it must re-validate from new frames."""
+        self.camera_clock_us = None
+        self.camera_clock_received_at = None
+        self.camera_clock_samples = 0
+        self.camera_clock_invalid = None
 
     def perception_callback(self, msg):
         decoded = target_perception.decode(msg.data)
@@ -771,6 +842,14 @@ class PX4UAVEnv(gym.Env):
     # Wall-clock receipt age after which a perception message is not current.
     # The RGB camera measured ~2 Hz wall under software rendering.
     PERCEPTION_MAX_AGE = 1.5
+    # Action clock (RGB camera_info Gazebo stamps). Wall-clock age after which the
+    # last new frame no longer counts as a running clock: same bound as
+    # OBSERVATION_MAX_AGE (~11 frames at 0.35x, ~6 at 0.2x).
+    CAMERA_CLOCK_MAX_AGE = 1.0
+    # reset() requires this many increasing frames, received after the reset
+    # began, within this wall time before it may take off (never arms without).
+    CAMERA_CLOCK_MIN_SAMPLES = 2
+    CAMERA_CLOCK_WAIT_TIMEOUT = 3.0
     TARGET_MEMORY_EXPIRY = 8.0          # s of simulation time
     # Repeatable episode start (PX4 local NED; the spawn heading is east).
     START_X = 0.0
@@ -878,8 +957,9 @@ class PX4UAVEnv(gym.Env):
                 raise ValueError("Observation needs fresh, valid PX4 local position.")
             if not odometry_fresh:
                 raise ValueError("Observation needs fresh PX4 odometry (yaw rate).")
-            if node.sim_clock_us is None:
-                raise ValueError("Observation needs the PX4 simulation clock.")
+            clock_problem = self._camera_clock_problem(now)
+            if clock_problem is not None:
+                raise ValueError(f"Observation needs a valid simulation clock: {clock_problem}.")
             ego = sar_observation.EgoState(
                 x=node.x, y=node.y, z=node.z, vx=node.vx, vy=node.vy,
                 heading=node.heading, yaw_rate=node.yaw_rate,
@@ -889,10 +969,37 @@ class PX4UAVEnv(gym.Env):
                 None if node.perception_received_at is None
                 else now - node.perception_received_at
             )
-            now_s = node.sim_clock_us / 1_000_000
+            now_s = node.camera_clock_us / 1_000_000
         return self.builder.build(
             raw, self.previous_action, ego, perception, perception_age, now_s
         )
+
+    def _camera_clock_problem(self, now, min_samples=1):
+        """None if the action clock is valid and running; otherwise why not (caller holds the condition)."""
+        node = self.node
+        if node.camera_clock_invalid is not None:
+            return f"invalid ({node.camera_clock_invalid})"
+        if node.camera_clock_us is None or node.camera_clock_received_at is None:
+            return "unavailable (no RGB camera_info received)"
+        if node.camera_clock_samples < min_samples:
+            return f"not yet validated ({node.camera_clock_samples} of {min_samples} frames)"
+        age = now - node.camera_clock_received_at
+        if age > self.CAMERA_CLOCK_MAX_AGE:
+            return f"stalled (no new camera frame for {age:.2f} s)"
+        return None
+
+    def _wait_for_camera_clock(self):
+        """Before take-off: require a running camera clock re-validated since reset(); never arm without it."""
+        deadline = time.monotonic() + self.CAMERA_CLOCK_WAIT_TIMEOUT
+        with self.node.condition:
+            while True:
+                now = time.monotonic()
+                problem = self._camera_clock_problem(now, self.CAMERA_CLOCK_MIN_SAMPLES)
+                if problem is None:
+                    return
+                if self.node.camera_clock_invalid is not None or now >= deadline:
+                    raise RuntimeError(f"Cannot take off: simulation clock {problem}.")
+                self.node.condition.wait(timeout=min(0.1, deadline - now))
 
     def _privileged_info(self):
         """Simulator ground truth for evaluation and debugging only; never part of the observation."""
@@ -912,22 +1019,43 @@ class PX4UAVEnv(gym.Env):
         self,
         timeout=2.0,
         previous_counter=None,
-        min_sim_clock_us=None,
+        step_applied_at=None,
     ):
 
         start = time.monotonic()
+        step_us = int(self.STEP_DURATION * 1_000_000)
+        anchor_us = None
+        if step_applied_at is not None:
+            self._step_anchor_us = None          # visible for diagnostics and tests
 
         with self.node.condition:
 
             while True:
 
-                sim_ready = (
-                    min_sim_clock_us is None
-                    or (
-                        self.node.sim_clock_us is not None
-                        and self.node.sim_clock_us >= min_sim_clock_us
+                # An action step (step_applied_at = monotonic time the action was
+                # applied) is timed in camera-clock (Gazebo) time from an anchor: the
+                # first valid frame received after the action. Earlier progress never
+                # counts. If several frames arrive before this re-check, the anchor is
+                # the latest of them, which can only lengthen the step. A stalled clock
+                # never completes the step, so the wall timeout below ends the wait.
+                sim_ready = step_applied_at is None
+                if step_applied_at is not None:
+                    if self.node.camera_clock_invalid is not None:
+                        raise RuntimeError(
+                            f"Simulation clock invalid during the action step: {self.node.camera_clock_invalid}."
+                        )
+                    clock_ok = self._camera_clock_problem(time.monotonic()) is None
+                    if (
+                        anchor_us is None
+                        and clock_ok
+                        and self.node.camera_clock_received_at > step_applied_at
+                    ):
+                        anchor_us = self._step_anchor_us = self.node.camera_clock_us
+                    sim_ready = (
+                        anchor_us is not None
+                        and clock_ok
+                        and self.node.camera_clock_us >= anchor_us + step_us
                     )
-                )
                 if sim_ready and (
                     previous_counter is None
                     or self.node.observation_counter
@@ -943,6 +1071,8 @@ class PX4UAVEnv(gym.Env):
                         <= self.OBSERVATION_MAX_AGE
                     ):
 
+                        if step_applied_at is not None:
+                            self.last_step_clock = (anchor_us, self.node.camera_clock_us)
                         return (
                             self.node.latest_observation.copy()
                         )
@@ -1298,14 +1428,23 @@ class PX4UAVEnv(gym.Env):
 
         Requires fresh armed OFFBOARD status and valid local position throughout. Raises on any
         failure so callers fall back to the existing safe-state landing.
+
+        Simulation time is the PX4 HRT clock (as in takeoff), which updates about once per
+        simulated second. Elapsed time is anchored on the first HRT sample received after this
+        call starts, so it never exceeds the true elapsed time (the timeout cannot fire early; it
+        can fire up to ~1 simulated second late). No HRT progress for TAKEOFF_CLOCK_STALL_TIMEOUT
+        or a backward HRT stops the fly-to; the wall ceiling still bounds the whole call.
         """
         node = self.node
         max_age = self.TAKEOFF_TELEMETRY_MAX_AGE
-        wall_deadline = time.monotonic() + self.REPOSITION_WALL_TIMEOUT
+        started_at = time.monotonic()
+        wall_deadline = started_at + self.REPOSITION_WALL_TIMEOUT
+        anchor_px4_time = None
+        last_px4_time = None
+        last_clock_progress_at = started_at
         with node.condition:
             node.goal = (float(x), float(y), float(z), float(yaw))
             node.phase = "REPOSITION"
-            sim_start = node.sim_clock_us
             node.condition.notify_all()
             while True:
                 now = time.monotonic()
@@ -1340,11 +1479,24 @@ class PX4UAVEnv(gym.Env):
                 )
                 if arrived:
                     return
-                if sim_start is None:
-                    sim_start = node.sim_clock_us
+                px4_time = node.px4_sim_time_us
+                received_at = node.px4_sim_time_received_at
+                if px4_time is not None and received_at is not None and received_at > started_at:
+                    if last_px4_time is not None and px4_time < last_px4_time:
+                        raise RuntimeError("PX4 simulation clock moved backwards during fly-to.")
+                    if last_px4_time is None or px4_time > last_px4_time:
+                        last_px4_time = px4_time
+                        last_clock_progress_at = now
+                    if anchor_px4_time is None:
+                        anchor_px4_time = px4_time
+                if now - last_clock_progress_at >= self.TAKEOFF_CLOCK_STALL_TIMEOUT:
+                    raise TimeoutError(
+                        "Fly-to stopped: PX4 simulation clock did not advance before "
+                        "the clock-stall timeout."
+                    )
                 sim_elapsed = (
-                    0.0 if sim_start is None or node.sim_clock_us is None
-                    else (node.sim_clock_us - sim_start) / 1_000_000
+                    0.0 if anchor_px4_time is None
+                    else (last_px4_time - anchor_px4_time) / 1_000_000
                 )
                 if sim_elapsed >= self.REPOSITION_SIM_TIMEOUT or now >= wall_deadline:
                     raise TimeoutError(
@@ -1538,6 +1690,9 @@ class PX4UAVEnv(gym.Env):
         self.previous_action[:] = 0.0
         with self.node.condition:
             self.node.action[:] = 0.0
+            # A new episode never inherits the previous clock (including a sticky
+            # invalidation): it must re-validate from frames received from now on.
+            self.node.reset_camera_clock()
 
         # For the FIRST integration test we assume a
         # clean / landed PX4 simulation.
@@ -1549,6 +1704,9 @@ class PX4UAVEnv(gym.Env):
             self._wait_until_landed(
                 timeout=self.LAND_WAIT_TIMEOUT
             )
+
+            # Refuse before arming unless the action clock is running (no fallback).
+            self._wait_for_camera_clock()
 
             self._takeoff()
 
@@ -1602,18 +1760,20 @@ class PX4UAVEnv(gym.Env):
             self._distance_to_target()
         )
 
-        # Send action to PX4 controller; the step lasts STEP_DURATION of
-        # simulation time and ends on the first fresh LiDAR sectors after that.
-        with self.node.condition:
-            self.node.action[:] = action
-            previous_counter = self.node.observation_counter
-            start_clock = self.node.sim_clock_us
-            self._step_min_sim_clock_us = (
-                None if start_clock is None
-                else start_clock + int(self.STEP_DURATION * 1_000_000)
-            )
-
         try:
+            # Send action to PX4 controller; the step lasts STEP_DURATION of
+            # simulation (camera-clock) time after the first camera frame received
+            # once the action is applied, and ends on the first fresh LiDAR sectors
+            # after that. Without a valid running clock the step is not timed at
+            # all: refuse before applying the action (safe state below).
+            with self.node.condition:
+                clock_problem = self._camera_clock_problem(time.monotonic())
+                if clock_problem is not None:
+                    raise RuntimeError(f"Cannot time the action step: simulation clock {clock_problem}.")
+                self.node.action[:] = action
+                previous_counter = self.node.observation_counter
+                self._step_applied_at = time.monotonic()
+
             return self._step_after_action(
                 action,
                 old_distance,
@@ -1638,7 +1798,7 @@ class PX4UAVEnv(gym.Env):
             self._wait_for_observation(
                 timeout=2.0,
                 previous_counter=previous_counter,
-                min_sim_clock_us=getattr(self, "_step_min_sim_clock_us", None),
+                step_applied_at=getattr(self, "_step_applied_at", None),
             )
         )
 

@@ -17,7 +17,13 @@ SITL runs add a runtime guard (RuntimeGuard), which can only stop an episode ear
 - Before reset/take-off it refuses to start unless MemAvailable >= 1.2 GiB and a full 25 s simulation-
   speed window is >= 0.35x ("guard_refuse").
 - Before every step it requires MemAvailable >= 600 MiB and a 25 s simulation speed >= 0.35x, taken as the
-  lower of the PX4 local-position clock and the camera image-stamp clock ("guard_abort").
+  lower of the PX4 HRT clock (TimesyncStatus timestamp + estimated_offset, ~1 sample per simulated second)
+  and the camera image-stamp clock ("guard_abort"). PX4 local-position stamps are not used for speed: PX4
+  slews them toward wall time after each DDS timesync reset.
+- PX4 liveness is checked separately: local-position receipt must be <= 1.0 s old. The HRT clock is stale
+  after MAX_SAMPLE_GAP_S without progress, and "stalled" if the camera clock advanced >= 2 simulated
+  seconds since the last HRT progress (the simulation runs but PX4 time does not). A slow simulation
+  advances both clocks and is judged only by the 0.35x rate.
 - Missing, stale, or gapped telemetry, or unreadable memory, counts as a failure, not as healthy.
 - An abort stops sending actions and then calls env.close(), the unchanged landing path: zero action, one
   NAV_LAND, wait for fresh landed-and-disarmed, ROS kept alive until then.
@@ -50,9 +56,15 @@ SPEED_FLOOR = 0.35              # x real time, same as the runbook readiness gat
 SPEED_WINDOW_S = 25.0           # s wall, same as the pre-flight stability windows
 MEM_START_MIB = 1.2 * 1024      # MemAvailable required before reset/take-off
 MEM_FLOOR_MIB = 600.0           # MemAvailable required before every step
-PX4_MAX_AGE_S = 1.0             # PX4UAVEnv.TAKEOFF_TELEMETRY_MAX_AGE
+PX4_MAX_AGE_S = 1.0             # PX4UAVEnv.TAKEOFF_TELEMETRY_MAX_AGE; PX4 link (local-position receipt) freshness
 CAMERA_MAX_AGE_S = 1.5          # PX4UAVEnv.PERCEPTION_MAX_AGE
 MAX_SAMPLE_GAP_S = 5.0          # a longer telemetry gap inside the window invalidates it
+# PX4 HRT updates about once per simulated second (~2.9 s wall at 0.35x). Its progress may be no older than
+# the window's own gap limit; a longer silence fails the window anyway.
+PX4_HRT_MAX_AGE_S = MAX_SAMPLE_GAP_S
+# Camera-clock advance (simulated s) since the last PX4 HRT progress that means PX4 time has stopped while the
+# simulation runs: two nominal HRT periods. Independent of simulation speed.
+PX4_HRT_STALL_CAMERA_S = 2.0
 SAMPLE_PERIOD_S = 1.0
 LOG_SAMPLE_PERIOD_S = 5.0
 PREFLIGHT_WAIT_S = 60.0         # wall time allowed for the first full speed window
@@ -73,19 +85,22 @@ def mem_available_mib(path="/proc/meminfo"):
 
 
 def px4_telemetry(env):
-    """Latest (sim_seconds, monotonic_received_at) per clock from PX4UAVEnv's node, or None if absent."""
+    """Latest clocks from PX4UAVEnv's node, each (sim_seconds, monotonic_received_at) or None if absent:
+    "px4" = PX4 HRT (reconstructed from TimesyncStatus), "camera" = perception image stamp. "px4_link" is the
+    monotonic receipt time of the latest PX4 local position (liveness only; its stamps are slewed)."""
     node = env.node
 
     def read():
         with node.condition:
             px4 = None
-            if node.sim_clock_us is not None and node.position_received_at is not None:
-                px4 = (node.sim_clock_us / 1_000_000, node.position_received_at)
+            if node.px4_sim_time_us is not None and node.px4_sim_time_received_at is not None:
+                px4 = (node.px4_sim_time_us / 1_000_000, node.px4_sim_time_received_at)
             camera = None
             perception = node.latest_perception
             if perception is not None and node.perception_received_at is not None:
                 camera = (float(perception["image_stamp"]), node.perception_received_at)
-        return {"px4": px4, "camera": camera}
+            link = node.position_received_at
+        return {"px4": px4, "camera": camera, "px4_link": link}
 
     return read
 
@@ -98,13 +113,14 @@ class RuntimeGuard:
     least SPEED_WINDOW_S older, and no gap above MAX_SAMPLE_GAP_S between them.
     """
 
-    STREAMS = {"px4": PX4_MAX_AGE_S, "camera": CAMERA_MAX_AGE_S}
+    STREAMS = {"px4": PX4_HRT_MAX_AGE_S, "camera": CAMERA_MAX_AGE_S}
 
     def __init__(self, telemetry, memory=mem_available_mib, clock=time.monotonic):
         self.telemetry = telemetry
         self.memory = memory
         self.clock = clock
         self.samples = {name: deque() for name in self.STREAMS}
+        self.px4_link_at = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -112,6 +128,9 @@ class RuntimeGuard:
     def sample(self):
         values = self.telemetry()
         with self._lock:
+            link = values.get("px4_link")
+            if link is not None and (self.px4_link_at is None or link > self.px4_link_at):
+                self.px4_link_at = float(link)
             for name in self.STREAMS:
                 value = values.get(name)
                 if value is None or value[0] is None or value[1] is None:
@@ -120,6 +139,8 @@ class RuntimeGuard:
                 history = self.samples[name]
                 if history and received <= history[-1][0]:
                     continue                                   # no new message since the last sample
+                if history and sim_s == history[-1][1]:
+                    continue                                   # duplicate: no progress, freshness not refreshed
                 if history and sim_s < history[-1][1]:
                     history.clear()                            # clock went backwards: start over
                 history.append((received, sim_s))
@@ -146,30 +167,54 @@ class RuntimeGuard:
         wall0, sim0 = window[0]
         return (latest_sim - sim0) / (latest_wall - wall0), "ok"
 
+    def _px4_link_status(self, now):
+        if self.px4_link_at is None:
+            return "missing"
+        return "stale" if now - self.px4_link_at > PX4_MAX_AGE_S else "ok"
+
+    def _px4_clock_stalled(self):
+        """True if the camera clock advanced >= PX4_HRT_STALL_CAMERA_S since the last PX4 HRT progress.
+
+        The camera reference at that instant is the first camera sample received at or after it, which can
+        only understate the advance (no false stall from sampling granularity)."""
+        px4, camera = self.samples["px4"], self.samples["camera"]
+        if not px4 or not camera:
+            return False
+        last_px4_at = px4[-1][0]
+        after = [sim for received, sim in camera if received >= last_px4_at]
+        return bool(after) and after[-1] - after[0] >= PX4_HRT_STALL_CAMERA_S
+
     def check(self, memory_floor_mib=MEM_FLOOR_MIB):
         self.sample()
         now = self.clock()
         memory = self.memory()
         with self._lock:
+            link_status = self._px4_link_status(now)
             px4_rate, px4_status = self._rate("px4", now)
             camera_rate, camera_status = self._rate("camera", now)
+            stalled = self._px4_clock_stalled()
         verdict = {
             "ok": False, "reason": None,
-            "px4_rate": px4_rate, "px4_status": px4_status,
+            "px4_rate": px4_rate, "px4_status": px4_status, "px4_link_status": link_status,
             "camera_rate": camera_rate, "camera_status": camera_status, "speed": None,
             "mem_available_mib": memory,
             "thresholds": {"speed_floor": SPEED_FLOOR, "speed_window_s": SPEED_WINDOW_S,
                            "mem_floor_mib": memory_floor_mib, "px4_max_age_s": PX4_MAX_AGE_S,
-                           "camera_max_age_s": CAMERA_MAX_AGE_S, "max_sample_gap_s": MAX_SAMPLE_GAP_S},
+                           "camera_max_age_s": CAMERA_MAX_AGE_S, "max_sample_gap_s": MAX_SAMPLE_GAP_S,
+                           "px4_hrt_max_age_s": PX4_HRT_MAX_AGE_S, "px4_hrt_stall_camera_s": PX4_HRT_STALL_CAMERA_S},
         }
-        if px4_status == "ok" and camera_status == "ok":
+        if link_status == "ok" and px4_status == "ok" and camera_status == "ok":
             verdict["speed"] = min(px4_rate, camera_rate)
         if memory is None:
             verdict["reason"] = "memory_unavailable"
         elif memory < memory_floor_mib:
             verdict["reason"] = "memory_below_floor"
+        elif link_status != "ok":
+            verdict["reason"] = f"px4_telemetry_{link_status}"
         elif px4_status != "ok":
             verdict["reason"] = f"px4_clock_{px4_status}"
+        elif stalled:
+            verdict["reason"] = "px4_clock_stalled"
         elif camera_status != "ok":
             verdict["reason"] = f"camera_clock_{camera_status}"
         elif verdict["speed"] < SPEED_FLOOR:
@@ -185,7 +230,7 @@ class RuntimeGuard:
             verdict = self.check(memory_floor_mib=MEM_START_MIB)
             # Only "not yet enough data" waits; any other failure refuses at once. Waiting never passes
             # by itself: the loop ends in a refusal at the deadline.
-            history_pending = verdict["reason"] in ("px4_clock_missing", "camera_clock_missing",
+            history_pending = verdict["reason"] in ("px4_telemetry_missing", "px4_clock_missing", "camera_clock_missing",
                                                     "px4_clock_insufficient_history",
                                                     "camera_clock_insufficient_history")
             if verdict["ok"] or not history_pending or self.clock() >= deadline:

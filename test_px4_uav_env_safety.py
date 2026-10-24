@@ -45,6 +45,10 @@ def load_environment(monkeypatch):
     rclpy_qos.QoSProfile = lambda **kwargs: None
     rclpy_qos.ReliabilityPolicy = SimpleNamespace(BEST_EFFORT=1)
     rclpy_qos.DurabilityPolicy = SimpleNamespace(VOLATILE=1)
+    rclpy_qos.qos_profile_sensor_data = None
+
+    sensor_msgs = types.ModuleType("sensor_msgs.msg")
+    sensor_msgs.CameraInfo = type("CameraInfo", (), {})
 
     std_msgs = types.ModuleType("std_msgs.msg")
     std_msgs.Float32MultiArray = type("Float32MultiArray", (), {})
@@ -83,6 +87,7 @@ def load_environment(monkeypatch):
         ("rclpy.node", rclpy_node),
         ("rclpy.qos", rclpy_qos),
         ("std_msgs.msg", std_msgs),
+        ("sensor_msgs.msg", sensor_msgs),
         ("px4_msgs.msg", px4_msgs),
     ):
         monkeypatch.setitem(sys.modules, name, module)
@@ -134,6 +139,11 @@ class FakeNode:
         self.px4_sim_time_us = 1_000_000
         self.px4_sim_time_received_at = time.monotonic()
         self.sim_clock_us = 1_000_000
+        # A valid, running action clock unless a test says otherwise.
+        self.camera_clock_us = 1_000_000
+        self.camera_clock_received_at = time.monotonic()
+        self.camera_clock_samples = 5
+        self.camera_clock_invalid = None
         self.TAKEOFF_TARGET_Z = -1.8
         self.hold_z = -1.8
         self.goal = None
@@ -158,6 +168,11 @@ class FakeNode:
         self.land_calls += 1
         self.landing_complete = False
         self.land_setpoints_released = False
+
+    def reset_camera_clock(self):
+        # The fake keeps a running clock across reset() so existing reset/takeoff
+        # tests are unaffected; clock re-validation is tested with the real node logic.
+        self.camera_clock_received_at = time.monotonic()
 
     def has_px4_setpoint_subscribers(self):
         return self.px4_setpoint_subscribers
@@ -1962,7 +1977,7 @@ def test_observation_refuses_stale_or_missing_onboard_state(monkeypatch, stale):
     elif stale == "odometry":
         env.node.odometry_received_at = None
     else:
-        env.node.sim_clock_us = None
+        env.node.camera_clock_us = None
 
     with pytest.raises(ValueError):
         env._convert_observation(np.full(49, 7.5, dtype=np.float32))
@@ -2133,7 +2148,8 @@ def test_fly_to_times_out_in_simulation_time(monkeypatch):
         for _ in range(30):
             time.sleep(0.01)
             with env.node.condition:
-                env.node.sim_clock_us += 100_000
+                env.node.px4_sim_time_us += 100_000          # PX4 HRT (fly-to's clock)
+                env.node.px4_sim_time_received_at = time.monotonic()
                 env.node.position_received_at = time.monotonic()
                 env.node.condition.notify_all()
     threading.Thread(target=advance, daemon=True).start()
@@ -2213,10 +2229,17 @@ def test_step_observation_waits_for_simulation_time(monkeypatch):
     env._wait_for_observation = module.PX4UAVEnv._wait_for_observation.__get__(env)
     env.node.observation_counter = 5
     env.node.observation_received_at = time.monotonic()
-    env.node.sim_clock_us = 1_000_000
+    env.node.camera_clock_us = 1_000_000
+    env.node.camera_clock_received_at = time.monotonic()
+    applied_at = time.monotonic()
 
+    # No camera frame after the action: never complete (fresh LiDAR is not enough).
     with pytest.raises(TimeoutError, match="simulation-time"):
-        env._wait_for_observation(timeout=0.05, previous_counter=4, min_sim_clock_us=1_100_000)
+        env._wait_for_observation(timeout=0.05, previous_counter=4, step_applied_at=applied_at)
 
-    env.node.sim_clock_us = 1_100_000
-    assert env._wait_for_observation(timeout=0.05, previous_counter=4, min_sim_clock_us=1_100_000) is not None
+    # One frame after the action only anchors the step; it needs 0.1 s more camera time.
+    env.node.camera_clock_us = 1_400_000
+    env.node.camera_clock_received_at = time.monotonic()
+    with pytest.raises(TimeoutError, match="simulation-time"):
+        env._wait_for_observation(timeout=0.05, previous_counter=4, step_applied_at=applied_at)
+    assert env._step_anchor_us == 1_400_000

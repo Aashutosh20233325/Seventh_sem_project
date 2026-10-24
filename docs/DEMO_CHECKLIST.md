@@ -1,6 +1,8 @@
 # Visible Gazebo/PX4 target-reaching demo — checklist
 
-Status (2026-10-23): **the demo is blocked at the readiness stage.** No flight is authorized by this document. Every
+Status (2026-10-24): **no-flight readiness passes with split rendering** (`restart_20261024_guardcheck3`: all gates, 6/6
+stability windows, a 300 s passive runtime-guard run). The B1/B2/B3 clock and runtime-guard changes are **uncommitted
+and have not flown**. No flight is authorized by this document. Every
 step that could arm or take off is marked **DO NOT RUN WITHOUT EXPLICIT APPROVAL**. Detailed procedure and history:
 `runs/sar_demo_20261018/RUNBOOK_ISOLATED.md` and `runs/sar_demo_20261018/worklog.md`.
 
@@ -19,11 +21,12 @@ The episode runner (`run_target_reaching_episode.py`) drives `PX4UAVEnv` with th
 
 The runner has **no PPO path**. Flying a PPO checkpoint live would be a new, separately reviewed change. The E1R 300k checkpoints match the interface (`test_policy_interface_compat.py`), but the LiDAR safety filter is not wired into the live system.
 
-## Current blocker (measured 2026-10-22, run `restart_20261022_preflight1`)
+## Former blocker (measured 2026-10-22, run `restart_20261022_preflight1`; superseded, kept as a record)
 
-- **Speed:** the camera simulation speed was **0.334–0.347×** in 0/6 stability windows, against the **unchanged 0.35× gate**. The PX4 clock ran at about 0.40×, and every other gate passed.
+- **Speed:** the camera simulation speed was **0.334–0.347×** in 0/6 stability windows, against the **unchanged 0.35× gate**. The PX4 clock ran at about 0.40×, and every other gate passed. (That PX4 figure came from local-position stamps, which PX4 slews toward wall time; it reads roughly 10–15% high. The camera figure is the valid one.)
 - **Memory:** with the gz GUI on D3D12, MemAvailable falls about 137 MiB/min (1517 → 1036 MiB in 3.5 min). The server grows about 50 MiB/min and the GUI about 80 MiB/min. After start-up, gates, and six windows (~4.5 min), MemAvailable is below the runtime guard's 1.2 GiB start threshold, so `guard_refuse` would trigger even with passing speed.
 - **Not caused by:** stale telemetry, the target position, LiDAR, the observation/action interface, or the guard (its live read-only validation matched an independent computation).
+- **Since then:** WSL memory was raised to 5 GB and split rendering was adopted. In that configuration (its log shows 4915 MiB total, so it ran after the WSL change) `restart_20261023_split2` still failed 2/6 windows (camera 0.316× and 0.341×); `restart_20261023_clockcheck1`, `restart_20261024_guardcheck2` and `restart_20261024_guardcheck3` then passed 6/6 each (camera 0.374–0.411×), with MemAvailable ≥ 1664 MiB. So 3 of 4 runs passed the speed gate, and the margin is small: the lowest passing window was 0.374× (7% above 0.35×) and the lowest 25 s guard speed 0.365× (4%).
 
 ## Diagnosing rendering overhead without system changes
 
@@ -32,7 +35,7 @@ The runner has **no PPO path**. Flying a PPO checkpoint live would be a new, sep
 | `--software-rendering` (launcher flag, reversible) | Measured 2026-10-18: memory flat but **~0.17×**, so the gate fails. Diagnostic only. |
 | `--px4-server-config` (restores GstCameraSystem) | Adds load; diagnostic only. |
 | `HEADLESS=1` (PX4-supported; not exposed by the launcher) | Removes the GUI, which is about two thirds of the leak plus its GPU rendering. Previously authorized for diagnosis only, and a headless run is not a visible demo. |
-| GUI on llvmpipe, server on D3D12 ("split rendering") | **Implemented, untested live** (`b9b4588`): `start --split-rendering`. PX4 runs with `HEADLESS=1` (server only, still d3d12 from `gz_env.sh`); the launcher starts and records `gz_gui` from `gz_gui_env.sh` (llvmpipe). Expected to remove the GUI's ~80 MiB/min leak and free GPU time for the cameras; the speed effect is **unmeasured**. Next: one no-flight readiness run (needs approval). |
+| GUI on llvmpipe, server on D3D12 ("split rendering") | **Current readiness configuration** (`b9b4588`; render-check fix `8a73737`): `start --split-rendering`. PX4 runs with `HEADLESS=1` (server only, still d3d12 from `gz_env.sh`); the launcher starts and records `gz_gui` from `gz_gui_env.sh` (llvmpipe). No-flight readiness passed in the runs listed above. Not yet flown. |
 
 None of these change `.wslconfig`, Mesa, packages, PX4 parameters, or gates.
 
@@ -47,12 +50,13 @@ source /home/hp/px4_ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=43 GZ_PARTITION=uav_sar_validation_20261018_instance1 \
   SAR_LIDAR_TOPIC=/world/sar_walls/model/x500_lidar_2d_oakd_1/link/link/sensor/lidar_2d_v2/scan
 # QGroundControl must already be running. Its GCS heartbeat is required (NAV_DLL_ACT=2); never close it.
-.venv/bin/python tools/isolated_sitl.py start --profile sar_oakd --run-dir runs/sar_demo_20261018/restart_<YYYYMMDD>_<name>
+.venv/bin/python tools/isolated_sitl.py start --profile sar_oakd --split-rendering --run-dir runs/sar_demo_20261018/restart_<YYYYMMDD>_<name>
 .venv/bin/python -u tools/telemetry_recorder.py runs/sar_demo_20261018/restart_<...>/logs/telemetry_full.jsonl 3600 &
 ```
 
-Split-rendering variant (readiness candidate, `b9b4588`): add `--split-rendering` to the `start` command. Then verify
-the renderers per process (read-only; do not use the shared `~/.gz/rendering/ogre2.log`):
+Split rendering (`--split-rendering`, above) is the configuration that passed readiness. Without it the GUI also
+renders on D3D12, and the 2026-10-22 speed and memory blocker applies. Verify the renderers per process (read-only; do
+not use the shared `~/.gz/rendering/ogre2.log`):
 
 ```bash
 .venv/bin/python tools/isolated_sitl.py render-check --run-dir runs/sar_demo_20261018/restart_<...>   # exit 0 = server d3d12 + GUI llvmpipe
@@ -69,12 +73,20 @@ the renderers per process (read-only; do not use the shared `~/.gz/rendering/ogr
 ```bash
 .venv/bin/python tools/verify_isolated_topics.py --duration 8   # PASS (re-running the unchanged gate is allowed)
 .venv/bin/python tools/verify_world_target.py                   # live target == sim/worlds/sar_walls.sdf
-ros2 topic info /fmu/in/offboard_control_mode                   # Publisher count: 0
-ros2 topic info /fmu/in/trajectory_setpoint                     # Publisher count: 0
-ros2 topic info /fmu/in/vehicle_command                         # Publisher count: 0
+for t in offboard_control_mode vehicle_command trajectory_setpoint; do   # daemon-independent discovery, 5 s
+  timeout 30 ros2 topic info --no-daemon --spin-time 5 -v /fmu/in/$t
+done
+# PASS per topic only if: exit 0; one "Publisher count: 0" and no PUBLISHER endpoint; one "Subscription count: N"
+# matching N endpoint records; the expected px4_msgs type; and >= 1 subscription whose node name and namespace are
+# _CREATED_BY_BARE_DDS_APP_ with type hash INVALID (the PX4 XRCE-DDS agent's reader). Our own recorder's subscription
+# (passive_telemetry_recorder, RIHS01_ hash) does not count. The three PX4-side readers must share one DDS participant.
+# "Unknown topic", a timeout, or any other output is a FAIL, never "0 publishers".
+# Automated and logged (at most 3 attempts per topic; any publisher fails at once):
+#   /home/hp/uav_ros_experiments/guard_validation_20261024/guardcheck3/run_guardcheck3.sh (gate block) + fmu_in_gate_parse.py
 # Six 25 s light stability windows (no image subscriptions), each evaluated with the established gates:
 #   /home/hp/uav_ros_experiments/gst_camera_perf_20261018/measure_light.py
-#   /home/hp/uav_ros_experiments/preflight_guard_20261022/evaluate_window.py   (orchestration: run_preflight.sh there)
+#   /home/hp/uav_ros_experiments/preflight_guard_20261022/evaluate_window.py
+# (current orchestration: guardcheck3/run_guardcheck3.sh above; note that it ends with the gated stop)
 ```
 
 **Expected fresh topics:**
@@ -87,7 +99,7 @@ ros2 topic info /fmu/in/vehicle_command                         # Publisher coun
 - `/uav/target_perception`: about 7 Hz, publishing; `detected=0` on the ground is expected.
 
 **Each window must show:**
-- Simulation speed **≥ 0.35×** on the RGB, depth, and PX4 clocks.
+- Simulation speed **≥ 0.35×** on the RGB, depth, and PX4 terms. RGB and depth are the binding terms: the window's PX4 term comes from local-position stamps, which PX4 slews toward wall time after each timesync reset, so it reads about 10–15% high (for example 0.44× against 0.39× camera).
 - Status gap ≤ 2.0 s, land gap ≤ 4.0 s, perception gap ≤ 1.5 s.
 - LiDAR ≥ 5 Hz.
 - Vehicle disarmed, Hold, landed, preflight true, no failsafe, GCS connected.
@@ -96,7 +108,7 @@ ros2 topic info /fmu/in/vehicle_command                         # Publisher coun
 - MemAvailable must be ≥ 1.2 GiB when the runner starts.
 - Swap must not be approaching exhaustion.
 
-**Abort if:** any gate fails, any window is below 0.35×, memory is below the start threshold, any `/fmu/in` publisher exists, the vehicle is not landed and disarmed, or the renderer is not as expected.
+**Abort if:** any gate fails, any window is below 0.35×, memory is below the start threshold, any `/fmu/in` publisher exists or the PX4-side reader is not positively identified, the vehicle is not landed and disarmed, or the renderer is not as expected.
 
 ## Policy interface (verified offline)
 
@@ -124,17 +136,19 @@ The command refuses to run without `--i-confirm-supervised-flight`, refuses to o
 
 ## Evidence to review before authorizing a flight
 
-1. A fresh `verify_isolated_topics` PASS, `verify_world_target` PASS, `/fmu/in` publisher counts of 0, and the renderer check, from the same run.
+1. A fresh `verify_isolated_topics` PASS, `verify_world_target` PASS, the strict `/fmu/in` gate PASS (0 publishers and the PX4-side reader identified on all three topics), and the renderer check, from the same run.
 2. All six stability-window results: per-clock speed, gaps, and vehicle state, each ≥ 0.35×.
 3. MemAvailable and swap at the end of the windows, with the trend since start (it must still be ≥ 1.2 GiB when the runner would start).
-4. The commit hash and a clean tree, with the full offline suite passing at that commit.
+4. The commit hash and a clean tree, with the full offline suite passing at that commit. (Not yet met: the B1/B2/B3 changes are uncommitted.)
 5. QGroundControl connected (`gcs_connection_lost = false`).
 
-## Recovery, landing, and aborts (existing behaviour; unchanged)
+## Recovery, landing, and aborts (landing and abort paths unchanged; guard clock inputs changed by B3, uncommitted)
 
 - **Runtime guard** (`run_target_reaching_episode.py`):
   - **Before take-off:** refuses (`guard_refuse`, no arming) unless MemAvailable ≥ 1.2 GiB and a full 25 s window has speed ≥ 0.35×.
-  - **Before each step:** aborts (`guard_abort`) if MemAvailable < 600 MiB, if speed < 0.35× (lower of the PX4 and camera clocks), or if telemetry is missing, stale, or gapped.
+  - **Before each step:** aborts (`guard_abort`) if MemAvailable < 600 MiB, if speed < 0.35× (lower of the PX4 HRT clock and the camera image-stamp clock), or if telemetry is missing, stale, or gapped.
+  - **PX4 HRT clock:** `TimesyncStatus.timestamp + estimated_offset`, about one sample per simulated second. PX4 local-position stamps are not used for speed: PX4 slews them toward wall time after each DDS timesync reset.
+  - **Separate PX4 checks:** local-position receipt older than 1.0 s → `px4_telemetry_stale`; no HRT progress for 5 s → `px4_clock_stale` (repeated identical HRT values do not refresh it); camera clock advanced ≥ 2 simulated s since the last HRT progress → `px4_clock_stalled`. A backward clock restarts its window (fails until a full window rebuilds).
 - **Episode endings:**
   - Success or timeout: return to start, then land.
   - Collision or failsafe: land in place.

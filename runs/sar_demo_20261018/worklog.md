@@ -492,3 +492,55 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - **Consequence:** under split rendering, MemAvailable is below the runtime guard's 1.2 GiB start threshold within ~30 s of start, so `guard_refuse` would trigger independently of speed. The threshold is unchanged.
 - **Stop:** gated stop attempt 1 PASS (status 0.90 s, land 1.77 s; disarmed, landed, at rest), manifest `stopped_at_utc` 17:02:26. Afterwards there were no stack processes and 2545 MiB was available. QGroundControl (58699) is still running.
 - **Outcome:** no arming, take-off, flight command, or episode.
+
+## Split-rendering no-flight readiness run 2: speed gate FAIL (4/6 windows), stack stopped — 2026-10-23 17:31–17:37 UTC
+
+- **Code:** `master` at `8a73737`. Run `restart_20261023_split2`, `start --profile sar_oakd --split-rendering`, after the WSL memory change (the log shows 4915 MiB total, 4096 MiB swap). Orchestration: `/home/hp/uav_ros_experiments/preflight_split_20261023/run_preflight_split.sh`.
+- **Gates:** `verify_isolated_topics` PASS, `verify_world_target` PASS, `/fmu/in` publishers 0/0/0 (plain `ros2 topic info`), `render-check` exit 0.
+- **Stability: 4/6 windows PASS.** w1 0.341× and w2 0.316× (RGB and depth) failed the unchanged 0.35× gate; w3–w6 passed at 0.363–0.379×. The windows' PX4 term (local-position stamps, slewed by PX4) read 0.364–0.428×.
+- **Memory:** MemAvailable ≥ 1809 MiB; swap 0.
+- **Stop:** gated stop attempt 1 PASS, manifest `stopped_at_utc` 17:36:47.
+- **Outcome:** no arming, take-off, flight command, or episode.
+
+## Passive SITL clock validation (B1/B2, uncommitted): PASS, shutdown incomplete then self-completed — 2026-10-23 19:15–19:25 UTC
+
+- **Code:** `8a73737` plus the uncommitted B1/B2 changes. Run `restart_20261023_clockcheck1`, split rendering. Orchestration and analysis: `/home/hp/uav_ros_experiments/clock_validation_20261023/` (`run_clockcheck.sh`, `clock_recorder.py` (subscriptions only; raw RGB image subscription 200–290 s), `analyze_clock.py`, `analysis_restart_20261023_clockcheck1.json`). **Passive:** no `PX4UAVEnv`, no `/fmu/in` publisher, no arming.
+- **Gates:** all PASS (`/fmu/in` 0/0/0 with the plain query; `render-check` exit 0). **Stability 6/6 PASS**, camera 0.388–0.408×.
+- **Camera clock (`camera_info`):** 4203 frames, about 30.3 per simulated second, 0 duplicates, 0 backward, maximum gap 36 ms simulated and 0.28 s wall. Every RGB image stamp appeared in `camera_info`. Replaying the stream through the env's camera-clock logic: 0 invalidations, valid from 3.0 s, maximum receipt age 0.11 s.
+- **PX4 HRT (`TimesyncStatus.timestamp + estimated_offset`):** 248 samples, 12 duplicates, 0 backward, 108 post-reset burst steps, maximum wall gap 3.05 s. Camera vs HRT drift −0.02 s over 137 s; 25 s rates differed by ≤ 0.0043.
+- **Observer load:** subscribing to raw images lowered speed about 6% (0.401× → 0.376×).
+- **Resources and state:** MemAvailable ≥ 1664 MiB; swap ≈ 0.4 MiB. Vehicle disarmed, Hold, landed throughout; `/fmu/in` publishers 0.
+- **Stop:** attempt 1 passed the telemetry gate but was incomplete: the gz server outlasted the bounded SIGINT/SIGTERM (no SIGKILL). Attempts 2–5 refused (PX4 had exited, no telemetry). The server exited on its own 51–61 s after the stop began. The manifest has no `stopped_at_utc` and was left unmodified.
+- **Outcome:** no arming, take-off, flight command, or episode.
+
+## Passive B3 guard validation attempt 1: readiness gate FAIL (`/fmu/in` query `unknown`) — 2026-10-24 08:32–08:35 UTC
+
+- **Code:** `8a73737` plus the uncommitted B1/B2/B3 changes. Run `restart_20261024_guardcheck1`, split rendering. Orchestration: `/home/hp/uav_ros_experiments/guard_validation_20261024/run_guardcheck.sh`.
+- **Gates:** `verify_isolated_topics` PASS (attempt 2), `verify_world_target` PASS, `render-check` exit 0. `/fmu/in/offboard_control_mode` returned `publishers=unknown` (the other two 0), so the gate **failed closed**; the observer and stability windows did not run.
+- **Diagnosis (read-only):** no ROS 2 daemon existed when the gate ran, so each plain `ros2 topic info` used a fresh 0.5 s discovery (`ros2cli/node/direct.py` `DEFAULT_TIMEOUT = 0.5`). A topic not yet discovered prints "Unknown topic" and no count. This is the likely cause but was not directly confirmed: the gate discarded stderr. The 20 s timeout was not reached (all three queries took about 3.9 s).
+- **Stop:** attempt 1 incomplete (gz server), attempts 2–5 refused; the server exited on its own 35–45 s after the stop began. No SIGKILL; no `stopped_at_utc`.
+- **Outcome:** no guard observations; no arming, take-off, `/fmu/in` publishing, or episode.
+
+## Passive B3 guard validation attempt 2: PASS — 2026-10-24 08:44–08:53 UTC
+
+- **Code:** as attempt 1. Run `restart_20261024_guardcheck2`. Orchestration: `guard_validation_20261024/guardcheck2/run_guardcheck2.sh` (a copy; only the `/fmu/in` gate changed): `timeout 30 ros2 topic info --no-daemon --spin-time 5 -v`, exit 0, `Publisher count: 0`, `Subscription count` ≥ 1, every attempt logged, at most 3 attempts.
+- **`/fmu/in`:** all three topics 0 publishers on attempt 1 (about 6 s each), 2 subscribers each: `passive_telemetry_recorder` (our recorder) and `_CREATED_BY_BARE_DDS_APP_` (PX4's XRCE-DDS reader). The recorder alone would have satisfied "≥ 1 subscriber", so the gate was tightened for attempt 3.
+- **Stability 6/6 PASS**, camera 0.380–0.403×.
+- **Observer** (`guard_validation_20261024/guard_observer.py`; subscriptions only; the real env callbacks and the real `RuntimeGuard`, plus four shadow guards with synthetic input dropouts from 200 s): full 300 s, no abort. Analysis: `guardcheck2/guard_analysis.json`.
+  - Nominal guard: first OK at 27 s (warm-up), then **0 non-OK verdicts in 274 checks**. PX4 HRT vs camera term: maximum difference 0.0067; raw 25 s rates 0.380–0.402× for both. Every verdict was consistent with the 0.35× floor; minimum speed 0.378×.
+  - HRT: 198 samples, 8 duplicates, 0 backward, 82 burst steps, maximum wall gap 2.91 s. Position receipts: 5803, maximum gap 0.15 s.
+  - Shadow guards (1 s tick resolution): link dropped → `px4_telemetry_stale` at +1 s; camera dropped → `camera_clock_stale` at +2 s; HRT dropped, or re-delivered with identical values → `px4_clock_stale` at +3 s. None recovered.
+  - `px4_clock_stalled` never fired: below about 0.4× the 5 s HRT staleness limit fires first. Offline tests cover the stall path.
+- **Resources and state:** MemAvailable ≥ 1719 MiB; swap 0.5 → 9.2 MiB; gz server RSS 578 → 888 MiB. `/fmu/in` publishers 0 every second; vehicle disarmed and landed throughout.
+- **Stop:** same pattern as above; the server exited 47–58 s after the stop began. No SIGKILL; no `stopped_at_utc`.
+- **Outcome:** passive only; no arming, take-off, `/fmu/in` publishing, or episode.
+
+## Passive B3 guard validation attempt 3 (strict `/fmu/in` identity gate): PASS — 2026-10-24 09:14–09:23 UTC
+
+- **Code:** as attempt 1. Run `restart_20261024_guardcheck3`. Orchestration: `guard_validation_20261024/guardcheck3/run_guardcheck3.sh` (sha256 `fe3bc2eb…337c`) with `fmu_in_gate_parse.py`, 30 offline gate tests. A topic passes only with exit 0, one well-formed `Publisher count: 0` and no PUBLISHER endpoint, one well-formed `Subscription count` matching its endpoint records, the expected `px4_msgs` type, and ≥ 1 subscription with node name and namespace `_CREATED_BY_BARE_DDS_APP_` and type hash `INVALID`. The three PX4-side readers must share one DDS participant.
+- **`/fmu/in`: PASS.** All three topics on attempt 1 (6.1–6.3 s each): 0 publishers, 2 subscribers; PX4-side reader identified, recorder (`RIHS01_` hash) not counted. Shared participant `01.0f.c6.61.21.54.ca.08.00.00.00.00`, distinct from the recorder's. The endpoint order was reversed relative to attempt 2; the parser does not depend on order.
+- **Other gates:** topics PASS (attempt 2), world target PASS, `render-check` exit 0 at start and end. **Stability 6/6 PASS**, camera 0.374–0.411×.
+- **Observer:** full 300 s, no abort. Analysis: `guardcheck3/guard_analysis.json`. First OK at 29 s, then **0 non-OK verdicts in 272 checks**; minimum speed 0.365× (all consistent with the 0.35× floor). HRT: 208 samples, 10 duplicates, 0 backward, 89 burst steps, maximum wall gap 3.05 s. Position receipts: maximum gap 0.26 s. Shadow guards: link and camera dropouts failed at +2 s, HRT dropout and repeated HRT at +4 s (`px4_clock_stale`). `px4_clock_stalled` again not triggered live.
+- **Resources and state:** MemAvailable ≥ 1716 MiB. Swap grew 26.6 → 82.9 MiB while the observer ran (56 MiB, below its 64 MiB abort limit) and stayed at 84 MiB after the stop; gz server RSS 526 → 882 MiB. `/fmu/in` publishers 0 every second; vehicle disarmed and landed throughout.
+- **Stop:** same pattern; the server exited 46–56 s after the stop began. No SIGKILL; no `stopped_at_utc`.
+- **Outcome and limits:** passive only; no arming, take-off, `/fmu/in` publishing, or episode. This is evidence about discovery and the guard, **not proof of flight readiness**. Open observations, not demonstrated failures: swap growth, the 35–61 s gz-server exit since clockcheck1 (split2 stopped normally), and gz server memory growth (about 50 MiB/min). The live stall reason remains untriggered (offline coverage only). The B1 step clock, B2 fly-to timeout and B3 in-episode behaviour have not flown.

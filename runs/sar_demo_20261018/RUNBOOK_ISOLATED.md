@@ -266,8 +266,11 @@ ROS_DOMAIN_ID=43 .venv/bin/python tools/verify_shutdown_state.py --duration 5 --
 
 It uses the versioned world and model, the camera bridge, the perception node, and the GUI.
 
+Readiness has passed only with split rendering (`--split-rendering`: gz server on D3D12, GUI on llvmpipe; check with
+`isolated_sitl.py render-check --run-dir <run>`, exit 0). See `docs/DEMO_CHECKLIST.md`.
+
 ```bash
-.venv/bin/python tools/isolated_sitl.py start --profile sar_oakd \
+.venv/bin/python tools/isolated_sitl.py start --profile sar_oakd --split-rendering \
   --run-dir runs/sar_demo_20261018/restart_<YYYYMMDD>_oakd1
 ```
 
@@ -280,14 +283,14 @@ export ROS_DOMAIN_ID=43 GZ_PARTITION=uav_sar_validation_20261018_instance1 \
   SAR_LIDAR_TOPIC=/world/sar_walls/model/x500_lidar_2d_oakd_1/link/link/sensor/lidar_2d_v2/scan
 .venv/bin/python tools/verify_isolated_topics.py --duration 8      # PASS, preflight=True, disarmed, landed, 49 sectors
 .venv/bin/python tools/verify_world_target.py                      # live target matches sim/worlds/sar_walls.sdf
-ros2 topic hz /uav/camera/rgb/image     # record; expect about 1-2 Hz wall (software rendering)
+ros2 topic hz /uav/camera/rgb/image     # record; expect about 10-12 Hz wall (split rendering; 1-2 Hz under software rendering)
 ros2 topic hz /uav/camera/depth/image
 ros2 topic hz /uav/target_perception    # must be publishing (detected=0 is expected on the ground: the target is ~45 deg right of the spawn heading)
-gz topic -e -n 10 -t /world/sar_walls/stats | grep real_time_factor
+gz topic -e -n 10 -t /world/sar_walls/stats | grep real_time_factor   # record only; not a gate (unreliable here)
 ```
 
-- **Real-time factor:** RTF with the camera rendering must be **≥ 0.35**. The takeoff gate allows 15 s of simulation time within a 45 s wall ceiling.
-- **Control inputs:** `/fmu/in/*` must have 0 publishers.
+- **Simulation speed:** ≥ **0.35×** in each of six 25 s stability windows, on the RGB and depth camera-stamp clocks (`measure_light.py` + `evaluate_window.py`; see `docs/DEMO_CHECKLIST.md`). The windows' PX4 term uses local-position stamps, which PX4 slews toward wall time; it reads about 10–15% high and is not the binding term. The takeoff gate allows 15 s of simulation time within a 45 s wall ceiling.
+- **Control inputs:** `/fmu/in/*` must have 0 publishers, **and** the PX4-side reader must be positively discovered. Per topic, `timeout 30 ros2 topic info --no-daemon --spin-time 5 -v /fmu/in/<topic>` must exit 0 and show `Publisher count: 0`, no PUBLISHER endpoint, and a subscription with node name and namespace `_CREATED_BY_BARE_DDS_APP_` and type hash `INVALID`; the three readers must share one DDS participant. An unknown topic, a timeout, or any other output fails the gate. Automated version: `/home/hp/uav_ros_experiments/guard_validation_20261024/guardcheck3/`.
 - **Estimator:** must be healthy.
 
 ### 4. Record and fly once
@@ -307,10 +310,11 @@ gz topic -e -n 10 -t /world/sar_walls/stats | grep real_time_factor
 
 If takeoff, the start-pose flight, or landing confirmation fails: do not retry, do not force-disarm, and leave the stack running if landed/disarmed is not confirmed.
 
-**Runtime guard (`run_target_reaching_episode.py`, SITL only).** This adds to the readiness gates above and replaces none of them:
+**Runtime guard (`run_target_reaching_episode.py`, SITL only).** This adds to the readiness gates above and replaces none of them. The clock inputs below are those of the B3 change, which is **uncommitted** (at `8a73737` the guard still used local-position stamps):
 - **Before reset/take-off:** refuses (`guard_refuse`, no arming) unless `MemAvailable` ≥ 1.2 GiB and a full 25 s window shows simulation speed ≥ 0.35×. It waits at most 60 s for that window.
-- **Before every step:** aborts (`guard_abort`) if `MemAvailable` < 600 MiB or the 25 s speed is < 0.35×. Speed is the lower of the PX4 local-position clock and the camera image-stamp clock.
-- **Missing data fails:** missing or stale telemetry (PX4 > 1.0 s, camera > 1.5 s), a gap > 5 s inside the window, or unreadable memory counts as a failure, never as healthy.
+- **Before every step:** aborts (`guard_abort`) if `MemAvailable` < 600 MiB or the 25 s speed is < 0.35×. Speed is the lower of the PX4 HRT clock (`TimesyncStatus.timestamp + estimated_offset`, about one sample per simulated second) and the camera image-stamp clock. PX4 local-position stamps are not used for speed: PX4 slews them toward wall time after each DDS timesync reset.
+- **Missing data fails:** missing or stale telemetry, a gap > 5 s inside the window, or unreadable memory counts as a failure, never as healthy. Freshness limits: PX4 local-position receipt 1.0 s (`px4_telemetry_stale`); PX4 HRT progress 5 s (`px4_clock_stale`; identical repeated HRT values do not refresh it); camera 1.5 s (`camera_clock_stale`).
+- **PX4 clock stall:** if the camera clock advances ≥ 2 simulated s since the last HRT progress, the guard fails with `px4_clock_stalled`. At speeds up to about 0.4× the 5 s HRT staleness limit normally fires first; live, only staleness has been observed (`restart_20261024_guardcheck2/3`), and the stall path is covered by offline tests.
 - **What an abort does:** stops actions and calls the unchanged `close()`: zero action, one NAV_LAND, wait for fresh landed-and-disarmed, ROS kept alive until confirmed. There is no retry.
 - **Logging:** each record carries measurements, thresholds and timestamps. `guard_sample` records every 5 s also cover reset and close, where the guard only logs.
 - **Not covered:** the guard cannot interrupt `reset()` (take-off ≤ 45 s wall, fly-to-start ≤ 120 s wall) or a step's return-to-start; those keep their own bounded timeouts.
@@ -319,5 +323,6 @@ If takeoff, the start-pose flight, or landing confirmation fails: do not retry, 
 
 - The altitude-hold setpoint form (position z + xy velocity under the Offboard position flag).
 - The carrot fly-to.
-- The simulation-time step clock.
+- The simulation-time step clock (B1: RGB `camera_info` Gazebo stamps, uncommitted) and the HRT-based fly-to timeout (B2, uncommitted).
+- The runtime guard during an episode (B3: validated passively only, with synthetic dropouts, in `restart_20261024_guardcheck2` and `restart_20261024_guardcheck3`).
 - Live camera rates and perception latency with the camera on the flying model.
