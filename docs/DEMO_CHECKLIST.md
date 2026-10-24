@@ -154,6 +154,7 @@ The command refuses to run without `--i-confirm-supervised-flight`, refuses to o
   - Collision or failsafe: land in place.
   - Any failure during the return: land in place.
 - **Abort path:** the runner stops commanding and calls `close()`. That sets zero action and sends one NAV_LAND, then waits for fresh landed-and-disarmed telemetry. If that is not confirmed within 30 s, ROS stays alive in a non-daemon monitor until it is.
+- **Refusal before any flight command** (for example `guard_refuse`, or `reset()` failing before take-off): if the environment has never commanded flight, `close()` first waits up to 10 s for fresh disarmed and landed telemetry and, if confirmed, sends nothing (no NAV_LAND, no Offboard stream). Fresh armed status, missing or stale telemetry after 10 s, or any flight already commanded falls back to the abort path above.
 - **Not covered by the guard:** it cannot interrupt take-off (≤ 45 s wall) or fly-to-start (≤ 120 s wall); those have their own bounded timeouts, and PX4's offboard-loss failsafe applies if the stream stops.
 - **Never:** force-disarm, retry automatically, or stop the stack unless fresh telemetry shows landed and disarmed. Stop only with:
 

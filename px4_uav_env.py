@@ -833,6 +833,11 @@ class PX4UAVEnv(gym.Env):
     TAKEOFF_TIMEOUT = 15.0
     TAKEOFF_WALL_TIMEOUT = 45.0
     TAKEOFF_TELEMETRY_MAX_AGE = 1.0
+    # Before this env has ever commanded flight, safe-state entry first waits
+    # up to this long for fresh disarmed + landed telemetry instead of sending
+    # NAV_LAND. Replaying recorded SITL status/land receipt times through the
+    # same check confirmed the ground within 3.2 s in every case.
+    GROUND_CONFIRM_TIMEOUT = 10.0
     # Keep decisions tied to <=1 s-old status, but allow one replacement
     # VehicleStatus sample at the measured 1.71 s worst interval in the
     # isolated, competing SITL runs, with a small bounded margin.
@@ -903,6 +908,8 @@ class PX4UAVEnv(gym.Env):
         self.max_steps = self.task_config.max_steps
         self.current_step = 0
         self._episode_active = False
+        # Set (never cleared) when this env first enters a flight phase.
+        self._flight_commanded = False
         self._landing_pending = False
         self._landing_request_in_progress = False
         self._closed = False
@@ -1388,6 +1395,7 @@ class PX4UAVEnv(gym.Env):
                 )
             self.node.takeoff_target_x = self.node.x
             self.node.takeoff_target_y = self.node.y
+            self._flight_commanded = True
             self.node.phase = "TAKEOFF"
             self.node.land_setpoints_released = False
             self.node.takeoff_setpoint_count = 0
@@ -1444,6 +1452,7 @@ class PX4UAVEnv(gym.Env):
         last_clock_progress_at = started_at
         with node.condition:
             node.goal = (float(x), float(y), float(z), float(yaw))
+            self._flight_commanded = True
             node.phase = "REPOSITION"
             node.condition.notify_all()
             while True:
@@ -1601,6 +1610,45 @@ class PX4UAVEnv(gym.Env):
             )
         self._enter_safe_state()
 
+    def _confirm_ground_before_flight(self, timeout):
+        """Before any flight command: bounded wait for fresh disarmed + landed telemetry.
+
+        On success the phase becomes GROUND under the same lock and True is
+        returned. Fresh armed status, a flight command issued meanwhile, or the
+        timeout returns False so the caller falls through to the existing
+        safe-state behavior.
+        """
+        deadline = time.monotonic() + timeout
+        with self.node.condition:
+            while True:
+                if getattr(self, "_flight_commanded", True):
+                    return False
+                now = time.monotonic()
+                status_fresh = (
+                    self.node.status_received_at is not None
+                    and now - self.node.status_received_at
+                    <= self.TAKEOFF_TELEMETRY_MAX_AGE
+                )
+                if (
+                    status_fresh
+                    and self.node.arming_state
+                    != VehicleStatus.ARMING_STATE_DISARMED
+                ):
+                    return False
+                landed_fresh = (
+                    self.node.land_detected_received_at is not None
+                    and now - self.node.land_detected_received_at
+                    <= self.TAKEOFF_TELEMETRY_MAX_AGE
+                )
+                if status_fresh and landed_fresh and self.node.landed is True:
+                    self.node.phase = "GROUND"
+                    self.node.condition.notify_all()
+                    return True
+                remaining = deadline - now
+                if remaining <= 0:
+                    return False
+                self.node.condition.wait(timeout=min(remaining, 0.25))
+
     def _enter_safe_state(self):
 
         # Do not issue a landing command when fresh telemetry already says
@@ -1628,6 +1676,24 @@ class PX4UAVEnv(gym.Env):
             confirmed_ground = (
                 is_disarmed and landed_fresh and self.node.landed is True
             )
+            # An env built without __init__ counts as having commanded
+            # flight, which keeps the existing safe-state path.
+            never_commanded = not getattr(self, "_flight_commanded", True)
+
+        # If this env never commanded flight, PX4's slow status/land-detected
+        # publication (often > 1 s apart in SITL) must not turn an
+        # unconfirmed-but-grounded vehicle into a NAV_LAND request. Never wait
+        # on the spin thread: it delivers the telemetry being waited for.
+        if (
+            not confirmed_ground
+            and never_commanded
+            and threading.current_thread()
+            is not getattr(self, "spin_thread", None)
+            and self._confirm_ground_before_flight(
+                self.GROUND_CONFIRM_TIMEOUT
+            )
+        ):
+            return
 
         if confirmed_ground:
             with self.node.condition:

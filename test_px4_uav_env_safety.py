@@ -2243,3 +2243,192 @@ def test_step_observation_waits_for_simulation_time(monkeypatch):
     with pytest.raises(TimeoutError, match="simulation-time"):
         env._wait_for_observation(timeout=0.05, previous_counter=4, step_applied_at=applied_at)
     assert env._step_anchor_us == 1_400_000
+
+
+# ---------- safe state before any flight command (no NAV_LAND / Offboard when the ground is confirmed) ----------
+
+
+class PhaseRecordingNode(FakeNode):
+    """FakeNode that records every phase assignment. Offboard/setpoint messages are only published by the
+    control loop in LAND (and flight) phases, so "LAND never assigned" means no Offboard or setpoint traffic."""
+
+    def __setattr__(self, name, value):
+        if name == "phase":
+            self.__dict__.setdefault("phases", []).append(value)
+        super().__setattr__(name, value)
+
+
+def make_pre_flight_environment(module, maker=make_environment):
+    env = maker(module)
+    node = PhaseRecordingNode()
+    node.phase = "GROUND"
+    node.phases.clear()
+    node.status_received_at = time.monotonic()      # fresh disarmed status...
+    node.arming_state = 1
+    node.landed = None                              # ...but no fresh land_detected yet
+    node.land_detected_received_at = None
+    env.node = node
+    env._flight_commanded = False
+    env.GROUND_CONFIRM_TIMEOUT = 2.0
+    return env
+
+
+def report_later(module, node, delay=0.15):
+    def deliver():
+        time.sleep(delay)
+        report_landed_and_disarmed(module, node)
+    thread = threading.Thread(target=deliver)
+    thread.start()
+    return thread
+
+
+def test_never_commanded_safe_state_waits_for_fresh_ground_and_sends_nothing(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module)
+    reporter = report_later(module, env.node)
+    started = time.monotonic()
+    env._enter_safe_state()
+    reporter.join()
+    assert time.monotonic() - started < 1.5
+    assert env.node.phase == "GROUND" and "LAND" not in env.node.phases
+    assert env.node.land_calls == 0 and not env._episode_active
+    np.testing.assert_array_equal(env.node.action, [0.0, 0.0])
+
+
+def test_never_commanded_without_telemetry_falls_through_after_timeout(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module)
+    env.node.status_received_at = None
+    env.GROUND_CONFIRM_TIMEOUT = 0.1
+    started = time.monotonic()
+    env._enter_safe_state()
+    assert time.monotonic() - started >= 0.1
+    assert env.node.phase == "LAND" and env.node.land_calls == 1          # existing best-effort landing
+
+
+def test_never_commanded_with_stale_status_falls_through_after_timeout(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module)
+    env.node.status_received_at = time.monotonic() - 1.1
+    env.GROUND_CONFIRM_TIMEOUT = 0.1
+    env._enter_safe_state()
+    assert env.node.phase == "LAND" and env.node.land_calls == 1
+
+
+def test_never_commanded_with_fresh_armed_status_uses_existing_path_immediately(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module)
+    env.node.arming_state = 2
+    env.GROUND_CONFIRM_TIMEOUT = 5.0
+    started = time.monotonic()
+    env._enter_safe_state()
+    assert time.monotonic() - started < 0.2
+    assert env.node.phase == "LAND" and env.node.land_calls == 1
+
+
+@pytest.mark.parametrize("flag", [True, "missing"])
+def test_commanded_or_unknown_flag_keeps_existing_path_without_waiting(monkeypatch, flag):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module)
+    if flag == "missing":
+        del env._flight_commanded                  # built without __init__: treated as commanded
+    else:
+        env._flight_commanded = True
+    env.node.status_received_at = time.monotonic() - 1.1
+    env.GROUND_CONFIRM_TIMEOUT = 5.0
+    started = time.monotonic()
+    env._enter_safe_state()
+    assert time.monotonic() - started < 0.2
+    assert env.node.phase == "LAND" and env.node.land_calls == 1
+
+
+def test_flight_commanded_during_the_wait_falls_through_and_never_claims_ground(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module)
+
+    def command_flight():
+        time.sleep(0.1)
+        with env.node.condition:
+            env._flight_commanded = True
+            env.node.condition.notify_all()
+        time.sleep(0.05)
+        report_landed_and_disarmed(module, env.node)   # too late: the wait already gave up
+
+    thread = threading.Thread(target=command_flight)
+    thread.start()
+    started = time.monotonic()
+    env._enter_safe_state()
+    thread.join()
+    assert time.monotonic() - started < 1.0
+    assert "GROUND" not in env.node.phases and env.node.phases[-1] == "LAND"
+    assert env.node.land_calls == 0                    # existing path: fresh disarmed status, no NAV_LAND
+
+
+def test_safe_state_on_the_spin_thread_never_waits(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module)
+    env.spin_thread = threading.current_thread()
+    env.node.status_received_at = time.monotonic() - 1.1
+    env.GROUND_CONFIRM_TIMEOUT = 5.0
+    started = time.monotonic()
+    env._enter_safe_state()
+    assert time.monotonic() - started < 0.2
+    assert env.node.phase == "LAND" and env.node.land_calls == 1
+
+
+def test_takeoff_sets_flight_commanded_before_any_command_and_keeps_it_after_failure(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module, make_takeoff_environment)
+    seen = []
+    original_request = env.node.request_offboard
+
+    def request_offboard():
+        seen.append(env._flight_commanded)             # flag already set when the first command goes out
+        return original_request()
+
+    env.node.request_offboard = request_offboard
+    env.node.arm_ack_missing = True
+    with pytest.raises(Exception):
+        env._takeoff()
+    assert seen == [True] and env._flight_commanded is True
+    env.GROUND_CONFIRM_TIMEOUT = 5.0
+    started = time.monotonic()
+    env._enter_safe_state()                            # commanded: existing path, no ground-confirmation wait
+    assert time.monotonic() - started < 0.2
+    assert env.node.land_calls == 1                    # the fake arm() left the vehicle armed
+
+
+def test_fly_to_sets_flight_commanded(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module, make_takeoff_environment)
+    env.REPOSITION_WALL_TIMEOUT = 0.05
+    try:
+        env._fly_to(0.0, 0.0, -1.8, 0.0)
+    except Exception:
+        pass
+    assert env._flight_commanded is True and "REPOSITION" in env.node.phases
+
+
+def test_reset_refusal_before_takeoff_sends_no_command(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module, make_takeoff_environment)
+    env._wait_until_landed = lambda **kwargs: None
+    env.node.camera_clock_invalid = "test: clock invalid"
+    reporter = report_later(module, env.node)
+    with pytest.raises(RuntimeError, match="Cannot take off: simulation clock"):
+        env.reset()
+    reporter.join()
+    assert env._flight_commanded is False and env.node.arm_calls == 0
+    assert env.node.land_calls == 0 and env.node.phase == "GROUND" and "LAND" not in env.node.phases
+
+
+def test_close_after_preflight_refusal_sends_no_land_or_offboard(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_pre_flight_environment(module, make_close_environment)
+    env.LAND_WAIT_TIMEOUT = 2.0
+    monkeypatch.setattr(module.rclpy, "ok", lambda: False)
+    reporter = report_later(module, env.node)
+    env.close()                                        # runner path after guard_refuse: never reset
+    reporter.join()
+    assert env.node.land_calls == 0 and "LAND" not in env.node.phases
+    assert env.node.phase == "GROUND" and env.node.destroy_calls == 1
