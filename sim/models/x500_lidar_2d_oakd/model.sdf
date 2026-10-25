@@ -15,10 +15,10 @@
       <child>link</child>
       <pose relative_to="base_link">-.1 0 .26 0 0 0</pose>
     </joint>
-    <!-- OAK-D Lite: PX4 x500_depth mount (.12 .03 .242) moved 0.05 m forward to clear the
+    <!-- OAK-D Lite (project copy with the RGB camera at 960x540): PX4 x500_depth mount (.12 .03 .242) moved 0.05 m forward to clear the
          LiDAR base, pitched 30 deg nose-down (+pitch tips the optical axis toward -z). -->
     <include merge='true'>
-      <uri>model://OakD-Lite</uri>
+      <uri>model://OakD-Lite-960x540</uri>
       <pose>.17 .03 .242 0 0.5235987756 0</pose>
     </include>
     <joint name="CameraJoint" type="fixed">

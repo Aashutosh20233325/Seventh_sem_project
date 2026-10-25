@@ -28,7 +28,8 @@ SENSOR_OFFSET = np.array([0.01233, -0.03, 0.01878])   # optical centre in the Oa
 DEPTH_MIN, DEPTH_MAX = 0.2, 19.1                      # StereoOV7251 clip planes (m)
 
 TARGET_RADIUS = 0.5          # known-marker prior used by the sphere fit
-MIN_BLOB_PX_FULLRES = 150    # minimum red blob area at full RGB resolution
+MIN_BLOB_PX_FULLRES = 150    # minimum red blob area, in pixels of a REFERENCE_SIZE image (scaled to the actual size)
+REFERENCE_SIZE = (1920, 1080)  # the RGB resolution the threshold was set for (the original IMX214 model)
 MIN_DEPTH_SAMPLES = 20
 FIT_MAX_RMS = 0.05           # m; worse fits fall back to the surface estimate
 
@@ -95,17 +96,22 @@ def _valid_matrix(K, width, height):
     )
 
 
-def detect(rgb, depth, K_rgb, K_depth, stride=2):
+def detect(rgb, depth, K_rgb, K_depth, stride=None):
     """Detect the red sphere in one RGB/depth pair.
 
     ``depth`` may be None when no synchronised depth frame exists; the bearing is then reported from the
-    blob centroid with ``range_valid`` False. ``stride`` subsamples the RGB mask for speed; pixel
-    coordinates are reported at full resolution.
+    blob centroid with ``range_valid`` False. ``stride`` subsamples the RGB mask for speed (default: 2 for images
+    at least 1600 px wide, else 1, so the mask grid is about 960 px wide either way); pixel coordinates are reported
+    at full resolution. The minimum blob area scales with the image area, so the same target is detected at the same
+    distance at 1920x1080 and 960x540.
     """
     rgb = np.asarray(rgb)
     if rgb.ndim != 3 or rgb.shape[2] != 3 or not _valid_matrix(K_rgb, rgb.shape[1], rgb.shape[0]):
         return Detection(False, STATUS_INPUT_INVALID)
     K_rgb = np.asarray(K_rgb, float)
+    if stride is None:
+        stride = 2 if rgb.shape[1] >= 1600 else 1
+    min_blob_px = MIN_BLOB_PX_FULLRES * rgb.shape[0] * rgb.shape[1] / (REFERENCE_SIZE[0] * REFERENCE_SIZE[1])
     mask = red_mask(rgb[::stride, ::stride])
     labels, n = ndimage.label(mask)
     if n == 0:
@@ -113,7 +119,7 @@ def detect(rgb, depth, K_rgb, K_depth, stride=2):
     sizes = ndimage.sum(mask, labels, range(1, n + 1))
     k = int(np.argmax(sizes)) + 1
     blob_px = int(sizes[k - 1]) * stride * stride
-    if blob_px < MIN_BLOB_PX_FULLRES:
+    if blob_px < min_blob_px:
         return Detection(False, STATUS_NO_TARGET, blob_px=blob_px)
     vs, us = np.nonzero(labels == k)
     us = us * stride + (stride - 1) / 2.0

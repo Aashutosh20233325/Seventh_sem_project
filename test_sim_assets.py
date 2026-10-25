@@ -29,11 +29,11 @@ def test_uav_model_keeps_stock_lidar_mount_and_adds_pitched_oakd():
     model = ET.parse(SIM / "models/x500_lidar_2d_oakd/model.sdf").getroot().find("model")
     assert model.get("name") == "x500_lidar_2d_oakd"
     includes = {i.findtext("uri"): i for i in model.findall("include")}
-    assert set(includes) == {"x500", "model://lidar_2d_v2", "model://OakD-Lite"}
+    assert set(includes) == {"x500", "model://lidar_2d_v2", "model://OakD-Lite-960x540"}
     assert all(i.get("merge") == "true" for i in includes.values())
     # Identical to PX4 x500_lidar_2d so PX4 GZBridge's lidar subscription still applies.
     assert _pose(includes["model://lidar_2d_v2"].findtext("pose")) == [0.12, 0, 0.26, 0, 0, 0]
-    cam = _pose(includes["model://OakD-Lite"].findtext("pose"))
+    cam = _pose(includes["model://OakD-Lite-960x540"].findtext("pose"))
     assert cam[:3] == [0.17, 0.03, 0.242]
     assert math.isclose(cam[4], math.radians(30.0), abs_tol=1e-9)
     assert cam[3] == cam[5] == 0.0
