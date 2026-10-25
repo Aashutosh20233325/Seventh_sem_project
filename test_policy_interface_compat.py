@@ -78,7 +78,13 @@ def test_e1r_300k_checkpoint_matches_the_contract(run):
     assert action.shape == (2,) and 0.0 <= action[0] <= 1.0 and -1.0 <= action[1] <= 1.0
 
 
-def test_live_runner_drives_the_baseline_not_a_checkpoint():
-    """The supervised episode runner has no PPO path; using a checkpoint live would be a new, unreviewed change."""
+def test_live_runner_defaults_to_the_baseline_and_flies_a_checkpoint_only_behind_the_safety_filter():
+    """Replaces the former "no PPO path" tripwire (2026-10-25): a checkpoint is used only with --policy, and its
+    actions always pass through LidarSafetyFilter (there is no option to disable it)."""
+    import run_target_reaching_episode as runner
     src = (ROOT / "run_target_reaching_episode.py").read_text()
-    assert "BaselineController()" in src and "PPO" not in src and "stable_baselines3" not in src
+    assert "controller = BaselineController()" in src and "if controller is None:" in src
+    assert src.count("PolicyController(predict, lidar_age)") == 1 and "safety_filter=None" in src
+    assert "--policy" in src and not any(s in src for s in ("--no-safety", "--no-filter", "--unfiltered"))
+    c = runner.PolicyController(lambda obs: np.array([1.0, 0.0], np.float32), lambda: None)
+    np.testing.assert_array_equal(c.act(np.zeros(so.DIM, np.float32)), [0.0, 0.0])   # unknown LiDAR age: hover

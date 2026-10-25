@@ -1018,6 +1018,12 @@ class PX4UAVEnv(gym.Env):
             "z": self.node.z,
         }
 
+    def observation_age(self):
+        """Wall seconds since the LiDAR sectors last returned by reset()/step() were received, or None if
+        unknown (none returned yet in this episode). Used by the runner's LiDAR safety filter."""
+        received = getattr(self, "last_observation_received_at", None)
+        return None if received is None else time.monotonic() - received
+
     # ======================================================
     # Wait for observation
     # ======================================================
@@ -1080,6 +1086,9 @@ class PX4UAVEnv(gym.Env):
 
                         if step_applied_at is not None:
                             self.last_step_clock = (anchor_us, self.node.camera_clock_us)
+                        # Receipt time of exactly these sectors: a newer message may replace
+                        # latest_observation before the caller acts (see observation_age()).
+                        self.last_observation_received_at = self.node.observation_received_at
                         return (
                             self.node.latest_observation.copy()
                         )
@@ -1752,6 +1761,7 @@ class PX4UAVEnv(gym.Env):
 
         self._episode_active = False
         self.current_step = 0
+        self.last_observation_received_at = None
 
         self.previous_action[:] = 0.0
         with self.node.condition:

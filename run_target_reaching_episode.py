@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Run exactly one supervised target-reaching episode with the observation-only baseline controller.
+"""Run exactly one supervised target-reaching episode with the observation-only baseline controller, or with
+a saved PPO checkpoint (--policy) behind the LiDAR safety filter.
 
 SITL use (only after the runbook gates pass; see runs/sar_demo_20261018/RUNBOOK_ISOLATED.md):
     ROS_DOMAIN_ID=43 .venv/bin/python -u run_target_reaching_episode.py --log <run>/logs/episode.jsonl \\
@@ -7,6 +8,13 @@ SITL use (only after the runbook gates pass; see runs/sar_demo_20261018/RUNBOOK_
 
 Offline dry run against the kinematic stand-in (no ROS, no flight):
     .venv/bin/python run_target_reaching_episode.py --standin --log /tmp/episode.jsonl
+
+With --policy, the checkpoint is loaded (CPU, deterministic actions) and checked against sar_obs_v1 and the
+env's action space before any environment exists; its path and sha256 are logged. Every policy action passes
+through safety_layer.LidarSafetyFilter, which cannot be disabled here: it only reduces speed or replaces the
+turn, and LiDAR of unknown or stale age (PX4UAVEnv.observation_age(), wall time of the sectors' receipt), a
+malformed policy output, or invalid LiDAR commands a hover. Each step logs the original and applied action and
+the filter's reason. The stand-in computes LiDAR fresh every step, so it uses age 0, as in the evaluations.
 
 Per step it logs wall UTC and monotonic time, the simulation step index, the action, the observation's
 target fields, the reward, and info. Privileged values appear only under "privileged" (evaluation only;
@@ -47,6 +55,7 @@ import numpy as np
 
 import sar_observation as so
 from baseline_controller import BaselineController
+from safety_layer import LidarSafetyFilter
 
 TARGET_FIELDS = ("det_now", "det_bearing_sin", "det_bearing_cos", "det_range_valid", "det_range",
                  "est_valid", "est_bearing_sin", "est_bearing_cos", "est_range", "est_age", "height")
@@ -68,6 +77,7 @@ PX4_HRT_STALL_CAMERA_S = 2.0
 SAMPLE_PERIOD_S = 1.0
 LOG_SAMPLE_PERIOD_S = 5.0
 PREFLIGHT_WAIT_S = 60.0         # wall time allowed for the first full speed window
+POLICY_TORCH_THREADS = 1        # policy inference only; leave the CPU to the simulator
 
 _log_lock = threading.Lock()
 
@@ -284,8 +294,63 @@ def obs_fields(obs):
     return {name: float(obs[so.SLICES[name]][0]) for name in TARGET_FIELDS}
 
 
-def run(env, log, max_steps, guard=None):
-    controller = BaselineController()
+def check_policy_spaces(observation_space, action_space):
+    """Raise ValueError unless a policy's spaces are exactly sar_obs_v1 and the env's [speed, turn] action."""
+    problems = []
+    if tuple(observation_space.shape) != (so.DIM,):
+        problems.append(f"observation shape {tuple(observation_space.shape)} != ({so.DIM},)")
+    elif not (np.array_equal(observation_space.low, so.LOW) and np.array_equal(observation_space.high, so.HIGH)):
+        problems.append("observation bounds differ from sar_obs_v1")
+    if tuple(action_space.shape) != (2,) or not (np.array_equal(action_space.low, [0.0, -1.0])
+                                                and np.array_equal(action_space.high, [1.0, 1.0])):
+        problems.append("action space is not [speed 0..1, turn -1..1]")
+    if problems:
+        raise ValueError("policy does not match the env interface: " + "; ".join(problems))
+
+
+def load_policy(path):
+    """predict(obs) -> action for a stable-baselines3 PPO checkpoint (CPU, deterministic), checked first."""
+    import torch
+    from stable_baselines3 import PPO
+
+    torch.set_num_threads(POLICY_TORCH_THREADS)
+    model = PPO.load(str(path), device="cpu")
+    check_policy_spaces(model.observation_space, model.action_space)
+    return lambda obs: model.predict(obs, deterministic=True)[0]
+
+
+def file_sha256(path):
+    import hashlib
+
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+class PolicyController:
+    """A policy's actions through the LiDAR safety filter; `last` holds the latest decision for the step log."""
+
+    def __init__(self, predict, lidar_age, safety_filter=None):
+        self.predict = predict
+        self.lidar_age = lidar_age
+        self.safety_filter = safety_filter if safety_filter is not None else LidarSafetyFilter()
+        self.last = None
+
+    def act(self, obs):
+        age = self.lidar_age()
+        raw = np.asarray(self.predict(obs), dtype=np.float32)
+        if raw.shape != (2,) or not np.all(np.isfinite(raw)):
+            # A malformed output is never clipped into a command: hover, as for invalid LiDAR.
+            self.last = {"lidar_age_s": age, "original": jsonable(raw.reshape(-1)), "reason": "policy_invalid",
+                         "intervened": True, "front_clear_m": None, "min_clear_m": None}
+            return np.zeros(2, dtype=np.float32)
+        action, info = self.safety_filter.filter(obs, raw, age)
+        self.last = {"lidar_age_s": age, **info}
+        return action
+
+
+def run(env, log, max_steps, guard=None, controller=None):
+    if controller is None:
+        controller = BaselineController()
     if guard is not None:
         verdict = guard.preflight()
         record(log, "guard_preflight", guard=verdict)
@@ -307,9 +372,10 @@ def run(env, log, max_steps, guard=None):
                 break
         action = controller.act(obs)
         obs, reward, terminated, truncated, info = env.step(action)
+        policy = {"policy": controller.last} if isinstance(controller, PolicyController) else {}
         record(log, "step", step=step, action=action, reward=reward, terminated=terminated,
                truncated=truncated, fields=obs_fields(obs), min_lidar=float(np.min(obs[so.SLICES["lidar"]]) * 30),
-               info=info)
+               info=info, **policy)
         if terminated or truncated:
             result = info.get("reason")
             break
@@ -317,12 +383,12 @@ def run(env, log, max_steps, guard=None):
     return result
 
 
-def execute(env, log, max_steps, guard=None):
+def execute(env, log, max_steps, guard=None, controller=None):
     """One episode, then always env.close() (landing gates) and stop the guard. Never retries."""
     try:
         if guard is not None:
             guard.start(log)
-        return run(env, log, max_steps, guard)
+        return run(env, log, max_steps, guard, controller)
     finally:
         record(log, "close_start")
         if hasattr(env, "close"):
@@ -339,19 +405,36 @@ def main(argv=None):
     p.add_argument("--i-confirm-supervised-flight", action="store_true",
                    help="required for SITL: confirms the runbook preflight gates passed and a human is supervising")
     p.add_argument("--max-steps", type=int, default=600)
+    p.add_argument("--policy", type=Path,
+                   help="saved PPO checkpoint (.zip), always behind the LiDAR safety filter (default: baseline controller)")
     args = p.parse_args(argv)
     if not args.standin and not args.i_confirm_supervised_flight:
         p.error("SITL flight requires --i-confirm-supervised-flight after the runbook gates pass")
 
     with args.log.open("x") as log:                 # never overwrite an existing log
+        predict = None
+        if args.policy is not None:                 # before any environment exists: a bad checkpoint never flies
+            try:
+                predict = load_policy(args.policy)
+            except Exception as exc:
+                record(log, "policy_load_failed", path=str(args.policy), error=repr(exc))
+                raise
+            f = LidarSafetyFilter()
+            record(log, "policy_loaded", path=str(args.policy.resolve()), sha256=file_sha256(args.policy),
+                   torch_threads=POLICY_TORCH_THREADS, mem_available_mib=mem_available_mib(),
+                   safety_filter={"stop_clearance_m": f.stop_clearance, "slow_clearance_m": f.slow_clearance,
+                                  "emergency_clearance_m": f.emergency_clearance, "max_age_s": f.max_age_s})
         if args.standin:
             from sar_standin_env import SarStandInEnv
             env, guard = SarStandInEnv(), None      # offline: no simulator clock or memory to guard
+            lidar_age = lambda: 0.0                 # noqa: E731  (stand-in LiDAR is computed every step)
         else:
             from px4_uav_env import PX4UAVEnv
             env = PX4UAVEnv()
             guard = RuntimeGuard(px4_telemetry(env))
-        reason = execute(env, log, args.max_steps, guard)
+            lidar_age = env.observation_age
+        controller = None if predict is None else PolicyController(predict, lidar_age)
+        reason = execute(env, log, args.max_steps, guard, controller)
     print(f"EPISODE RESULT: {reason}", flush=True)
     return 0 if reason == "success" else 1
 

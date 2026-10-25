@@ -760,6 +760,19 @@ def test_observation_wait_rejects_cached_stale_array(monkeypatch):
         env._wait_for_observation(timeout=0.01)
 
 
+def test_observation_age_is_the_receipt_age_of_the_returned_sectors(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    assert env.observation_age() is None                       # nothing returned yet
+    env._wait_for_observation = module.PX4UAVEnv._wait_for_observation.__get__(env)
+    received = time.monotonic() - 0.3
+    env.node.observation_received_at = received
+    env._wait_for_observation(timeout=0.5)
+    env.node.observation_received_at = time.monotonic()        # a newer message must not make them look fresher
+    assert env.last_observation_received_at == received
+    assert 0.3 <= env.observation_age() < 1.0
+
+
 def test_observation_callback_rejects_non_finite_values(monkeypatch):
     module = load_environment(monkeypatch)
     node = module.PX4ControllerNode.__new__(module.PX4ControllerNode)
