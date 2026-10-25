@@ -6,8 +6,10 @@ Every step the controller:
          its centre ray ends in an occupied cell when something was hit); occupied cells are never cleared;
        - searched layer from the camera's field of view (+-CAM_HALF_FOV, CAM_MIN..CAM_MAX m, stopped by obstacles):
          where the camera has looked, so where the target cannot be;
-  2. chooses a mode: APPROACH while the camera detects the target or its estimate is valid (the inner controller,
-     e.g. PPO through runner.PolicyController, flies the action), otherwise EXPLORE;
+  2. chooses a mode: APPROACH while the camera detects the target or its estimate is valid, otherwise EXPLORE. In
+     APPROACH the target's map position comes from the observation's estimate (bearing and range) and the pose; if
+     the straight line to it is clear on the map the inner controller (e.g. PPO through runner.PolicyController) flies,
+     else the explorer plans around the obstacles to the target and flies that path (like an EXPLORE goal);
   3. in EXPLORE, every REPLAN_STEPS (or when the goal is reached or blocked) ranks candidate viewpoints by
          score = gain * exp(-LAMBDA * cost)
      gain  = predicted number of unsearched, not-occupied cells the camera would cover from the viewpoint at its best
@@ -49,6 +51,7 @@ LOOKAHEAD = 1.0              # m
 GOAL_TOLERANCE = 0.8         # m
 HEADING_TOLERANCE = math.radians(15)
 LOST_STEPS = 20              # steps without detection and without a valid estimate before exploring again
+LINE_CLEARANCE = 0.4         # m: the straight line to the target must keep this from occupied cells
 STUCK_STEPS = 60             # steps without 0.3 m progress toward the goal: give it up
 HEADINGS = [k * math.pi / 4 for k in range(8)]
 NEIGHBOURS = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
@@ -170,6 +173,8 @@ class ExplorerController:
 
     def reset(self):
         self.map = ExplorerMap()
+        self.target = None
+        self.approach_plan = 0
         self.mode = "EXPLORE"
         self.goal = None              # (i, j, heading, score)
         self.path = []
@@ -246,6 +251,45 @@ class ExplorerController:
         speed = 0.0 if abs(err) > math.radians(60) else 0.7 * math.cos(err)
         return speed, turn
 
+    def _target_position(self, obs, x, y, heading):
+        """Target (x, y) NED from the observation's estimate or detection (bearing +left), else None."""
+        f = lambda name: float(obs[so.SLICES[name]][0])  # noqa: E731
+        if f("est_valid") > 0:
+            b, r = math.atan2(f("est_bearing_sin"), f("est_bearing_cos")), f("est_range") * so.TARGET_RANGE_SCALE
+        elif f("det_now") > 0 and f("det_range_valid") > 0:
+            b, r = math.atan2(f("det_bearing_sin"), f("det_bearing_cos")), f("det_range") * so.TARGET_RANGE_SCALE
+        else:
+            return None
+        return x + r * math.cos(heading - b), y + r * math.sin(heading - b)
+
+    def _line_clear(self, x, y, tx, ty):
+        d = math.hypot(tx - x, ty - y)
+        if d < 1e-6:
+            return True
+        radius = int(math.ceil(LINE_CLEARANCE / RES))
+        occ = ndimage.binary_dilation(self.map.state == OCC, iterations=radius) if radius else self.map.state == OCC
+        for s in np.arange(0.0, max(d - 0.6, 0.0), RES / 2):         # stop short of the sphere itself
+            i, j = self.map.cell(x + (tx - x) * s / d, y + (ty - y) * s / d)
+            if self.map.inside(i, j) and occ[i, j]:
+                return False
+        return True
+
+    def _plan_to(self, x, y, tx, ty):
+        """Path to the reachable cell nearest the target (the explorer's goal while the direct line is blocked)."""
+        start = self.map.cell(x, y)
+        blocked = self.map.blocked()
+        blocked[start] = False
+        dist, pred = dijkstra(start, blocked, self.map.state)
+        ii, jj = np.nonzero(np.isfinite(dist))
+        if ii.size == 0:
+            return False
+        cx, cy = self.map.centre(ii, jj)
+        k = int(np.argmin(np.hypot(cx - tx, cy - ty) + 0.05 * dist[ii, jj]))
+        goal = (int(ii[k]), int(jj[k]))
+        self.path = [] if goal == start else (path_to(pred, start, goal) or [])
+        self.goal = (goal[0], goal[1], math.atan2(ty - cy[k], tx - cx[k]), 0.0)
+        return True
+
     def act(self, obs):
         x, y, heading = self.pose()
         self.steps += 1
@@ -260,9 +304,24 @@ class ExplorerController:
             if self.lost >= LOST_STEPS:
                 self.mode, self.goal, self.path, self.since_plan = "EXPLORE", None, [], REPLAN_STEPS
         if self.mode == "APPROACH":
-            action = np.asarray(self.inner.act(obs), np.float32)
-            inner_last = getattr(self.inner, "last", None)
-            self.last = {"mode": "APPROACH", "inner": inner_last}
+            target = self._target_position(obs, x, y, heading)
+            if target is not None:
+                self.target = target
+            tx, ty = self.target if self.target is not None else (None, None)
+            if tx is None or self._line_clear(x, y, tx, ty):
+                action = np.asarray(self.inner.act(obs), np.float32)
+                self.last = {"mode": "APPROACH", "via": "inner", "target_est": None if tx is None else
+                             [round(tx, 2), round(ty, 2)], "inner": getattr(self.inner, "last", None)}
+                self.approach_plan = 0
+                return action
+            if getattr(self, "approach_plan", 0) <= 0 or not self.path:   # line blocked: go around (replan each 10)
+                self._plan_to(x, y, tx, ty)
+                self.approach_plan = REPLAN_STEPS
+            self.approach_plan -= 1
+            raw = np.array(self._follow(x, y, heading), np.float32) if self.goal is not None else np.zeros(2, np.float32)
+            action, finfo = self.safety_filter.filter(obs, raw, self.lidar_age())
+            self.last = {"mode": "APPROACH", "via": "path", "target_est": [round(tx, 2), round(ty, 2)],
+                         "filter": finfo["reason"], "original": finfo["original"]}
             return action
         n_candidates = None
         if self.goal is not None:                            # give up a goal without progress, or a blocked path
