@@ -639,3 +639,21 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - After the stop it settled within 30–60 s in ppo1, ppo2 and ppo4. In ppo3 about 2,200 pages/s lasted about 10 minutes with no matching CPU activity; the cause was not identified.
   - ppo4's Windows samplers were stopped early on request (SIGINT to the exact recorded PIDs at 11:04, about 5 minutes after END). Their raw output is kept; the incomplete last row was excluded from the analysis.
 - **Outcome:** 4/4 live PPO successes from the same start and target, with very consistent behaviour; 38–41 steps against the baseline's 64. This shows repeatability, not generalisation (start and target fixed).
+
+## Stage B: start-heading series (3 PPO + 1 baseline): 4/4 SUCCESS — 2026-10-25 11:16–12:01 UTC
+
+- **Approval and code:** the user approved the four flights after the stand-in predictions. Code `4da38f5` (clean tree): `--start-yaw-offset-deg`, honoured identically by both envs. Policy as in Stage A (E1R 300k seed 2, numpy, sha256-pinned).
+- **Orchestration:** `/home/hp/uav_ros_experiments/stageb_prep_20261025/`. `run_stageb_flight.sh` (sha256 `d44c21c0…f987`) is a copy of the flown PPO script; it allows offsets 90/180/−90 and modes ppo/baseline, validated before anything starts. `run_series_b.sh` waits for the previous samplers, then at least 180 s after the previous END, then runs the host check. `check_episode.py` adds a reset-options check and requires the start heading reached at `reset_done` within 15° of the request. Tests: 23 offline; dry runs of both modes; full repo suite 469.
+- **Stand-in predictions** (`predict_headings.py`, `predictions.json`; 50 episodes per cell, all successes): PPO 47–133 steps vs baseline 72–283. Both search by turning right; +90° (target 45° left) was predicted to be the hardest case.
+
+| Run | Mode | Offset | Start heading reached | Windows | Steps | Episode (wall) | First detection | Filter slow / stop | Minimum LiDAR | Stand-in prediction |
+|---|---|---|---|---|---|---|---|---|---|---|
+| stageb1 | PPO | +90° | −178.8° | 0.475–0.531× | 36 | 21.2 s | at reset (41° left) | 9 / 0 | 2.01 m | 133 |
+| stageb2 | PPO | 180° | −89.3° | 0.514–0.541× | 86 | 34.0 s | step 49 | 10 / 0 | 2.09 m | 114 |
+| stageb3 | PPO | −90° | −1.3° | 0.521–0.533× | 62 | 29.0 s | step 26 | 9 / 0 | 2.16 m | 83 |
+| stageb4 | baseline | +90° | −178.6° | 0.486–0.507× | 205 | 67.5 s | step 151 | – | 1.79 m | 280 |
+
+- **Start-heading turns:** every 90–180° turn reached its heading within 1.4°; `reset()` took 25–29 s (18.5–20 s without a turn). Guard minimum speed 0.481–0.512×, minimum MemAvailable 1562–1636 MiB, no abort. `close()` took 12.3–13.4 s with landing and disarm confirmed; gated stops as in Stage A (no SIGKILL).
+- **Search:** in b2 and b3 (target about 135° off the nose) PPO turned right at full rate (mean turn +1.0) until detection, then approached directly.
+- **Field-of-view mismatch:** in b1 the live camera already detected the target 41° to the left at reset, so PPO turned left and flew straight in. The stand-in limits visibility to about 41° (34.5° half-FOV plus the sphere's angular radius), which is why it predicted a full right-turn search. The live edge is marginal: the baseline at the same heading (b4, −178.6°) had no detection at reset and searched right through about 315°.
+- **Outcome:** 7/7 live PPO successes in total (4 from the nominal start, 3 turned). Live PPO took fewer steps than the stand-in predicted in every case, and fewer than the live baseline (b1 36 vs b4 205, with the b1 FOV caveat). Still one fixed start point and one fixed target.
