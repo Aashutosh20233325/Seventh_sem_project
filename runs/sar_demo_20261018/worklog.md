@@ -657,3 +657,23 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Search:** in b2 and b3 (target about 135° off the nose) PPO turned right at full rate (mean turn +1.0) until detection, then approached directly.
 - **Field-of-view mismatch:** in b1 the live camera already detected the target 41° to the left at reset, so PPO turned left and flew straight in. The stand-in limits visibility to about 41° (34.5° half-FOV plus the sphere's angular radius), which is why it predicted a full right-turn search. The live edge is marginal: the baseline at the same heading (b4, −178.6°) had no detection at reset and searched right through about 315°.
 - **Outcome:** 7/7 live PPO successes in total (4 from the nominal start, 3 turned). Live PPO took fewer steps than the stand-in predicted in every case, and fewer than the live baseline (b1 36 vs b4 205, with the b1 FOV caveat). Still one fixed start point and one fixed target.
+
+## Stage C passive readiness runs (world variants, no flight): 3/3 PASS — 2026-10-25 12:57–13:22 UTC
+
+- **Approval and code:** the user approved three passive runs. Code `36f662c` (branch `stage-c-target-variants`, clean tree): world variants, the `SAR_WORLD_VARIANT` selector, `--world-variant`, and the world-consistency gate.
+- **Orchestration:** `/home/hp/uav_ros_experiments/stagec_prep_20261025/`. `run_series_c_passive.sh` runs `run_stagec.sh <run> <variant> passive` (sha256 `4b5287cc…800e`): all readiness gates, six windows, observer stop and pre-flight state check, then **no runner**. `check_episode.py` requires both world gates to have passed for that variant, no episode log, and the stack stopped.
+- **Every run, from its logs:**
+  - PX4 logged `Starting gazebo with world: …/sim/worlds/variants/<variant>/sar_walls.sdf`.
+  - `gz_env.sh` had `PX4_GZ_WORLDS=…/variants/<variant>`.
+  - The manifest recorded the variant, file and sha256.
+  - The world-target gate passed against the variant file (the live sphere at the moved position).
+  - The consistency gate passed.
+
+| Run | Target NED | World sha256 | Windows | Pre-flight state |
+|---|---|---|---|---|
+| stagec_c2_sw_passive | (−4.5, −2.5) | `44fc2863…` | 6/6, 0.456–0.537× | disarmed, landed, `/fmu/in` 0, 1716 MiB |
+| stagec_c5_w_passive | (−1.0, −4.5) | `5991dfdd…` | 6/6, 0.506–0.519× | disarmed, landed, `/fmu/in` 0, 1680 MiB |
+| stagec_c1_ne_passive | (2.5, 2.5) | `a81d36a4…` | 6/6, 0.506–0.512× | disarmed, landed, `/fmu/in` 0, 1678 MiB |
+
+- **Host:** before each run median 0–9 pages/s, page file 4.7 %. Stops: stack stopped every time (no SIGKILL). No flight, arming or `/fmu/in` publishing; QGroundControl left running.
+- **Also fixed:** the flight-block test harness's observer stand-in (a background `sleep`, which ignores SIGINT in non-interactive bash) made tests hang at random. It now installs its own SIGINT handler as rclpy does. The live observer always stopped within about 1 s (rc 1, rclpy shutdown).
