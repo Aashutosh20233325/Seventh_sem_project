@@ -711,3 +711,23 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Host check removed:** the first series stopped before flight 2. Its pre-run Windows host check reported about 2,200 pages/s, but this was McAfee (`mc-sustainability`, about 9 MB/s) reading files, not memory pressure (Pages Output/sec 0, 2 GB free, page file flat). At the user's request the host check and every inter-run wait were removed (`f40b56f`); simulation speed stays gated by the six stability windows. The waiting driver was stopped with SIGTERM to its exact PID (no stack running).
 - **Cancelled flights:** the user then asked for no more flights. The second series driver was stopped by exact PID during its first flight; that flight completed and landed normally. The moved-target and baseline test flights were cancelled (both modes flew earlier the same day through the identical procedure).
 - **Report:** `docs/PROJECT_STATE_REPORT.md`, with tag `demo-2026-10-25`.
+
+## 3D step 1: generated rough-terrain worlds, passive laptop load tests (no flight) — 2026-10-25 15:50–16:11 UTC
+
+- **Code:** branch `world-generator`: `23b3bd8` (generator, gen_l1/l2/l3_s1), then `a4a9e97` (terrain mesh visual only).
+- **First attempt** (`gentest_1_passive_gen_l3_s1_0`, at `23b3bd8`): the gz server **segfaulted while loading** the world, building the terrain mesh collision in DART's ODE collision detector (`dart::collision::detail::OdeMesh::fillArrays`).
+  - PX4 waited for a world that never came; the launcher stopped the start after 30 s without a clock.
+  - The gated stop correctly refused (no telemetry; no vehicle had been created). With the user's approval the two leftover owned groups (XRCE agent, PX4) were stopped with the launcher's own `_signal_owned_groups` (verified guards, SIGINT/SIGTERM, no SIGKILL).
+- **Fix** (`a4a9e97`): terrain mesh **visual only** (cameras and GPU LiDAR still see it). A thin collision box under each pad, top at 0, plus a safety plane below the lowest terrain. A test forbids mesh collision shapes. Real terrain collision is part of step 2.
+- **Re-test** (`run_demo_series.sh gentest2 "passive gen_l3_s1 0" "passive gen_l1_s1 0"`): **2/2 passive PASS**. Both loaded; world-target and consistency gates passed; render-check ok.
+
+| World | Obstacles (tall) | Stability windows | Min MemAvailable | gz server / GUI RSS max | Pre-flight MemAvailable |
+|---|---|---|---|---|---|
+| gen_l3_s1 (hardest) | 72 (52) | 6/6, 0.455–0.479× | 1250 MiB | 1081 / 1068 MiB | 1355 MiB |
+| gen_l1_s1 (easiest) | 23 (17) | 6/6, 0.415–0.480× | 1608 MiB | 930 / 909 MiB | 1719 MiB |
+| default world (stagec_c5_w_passive, reference) | 4 walls | 6/6, 0.506–0.521× | 1699 MiB | 849 / 845 MiB | 1680 MiB |
+
+- **Assessment:**
+  - **Speed:** about 10 % slower than the default world, still well above the 0.35× floor.
+  - **Memory:** the binding constraint. In the hardest world MemAvailable at the pre-flight check was 1355 MiB, about 126 MiB above the runtime guard's 1.2 GiB take-off threshold. The gz GUI (llvmpipe, CPU-rendered) and the server each grew about 220 MiB.
+  - **Errors:** the only PX4 errors were two IMU timestamp lines during shutdown.
