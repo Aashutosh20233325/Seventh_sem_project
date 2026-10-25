@@ -677,3 +677,24 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 
 - **Host:** before each run median 0–9 pages/s, page file 4.7 %. Stops: stack stopped every time (no SIGKILL). No flight, arming or `/fmu/in` publishing; QGroundControl left running.
 - **Also fixed:** the flight-block test harness's observer stand-in (a background `sleep`, which ignores SIGINT in non-interactive bash) made tests hang at random. It now installs its own SIGINT handler as rclpy does. The live observer always stopped within about 1 s (rc 1, rclpy shutdown).
+
+## Stage C flights (target moved, world variants): 4/4 SUCCESS — 2026-10-25 13:41–14:18 UTC
+
+- **Approval and code:** the user approved four flights after the passive runs. Code `8a6fd34` (master, clean tree), default start heading, policy as before (E1R 300k seed 2, numpy, sha256-pinned, LiDAR filter).
+- **Orchestration** (`/home/hp/uav_ros_experiments/stagec_prep_20261025/`):
+  - Flights 1–2 ran through `run_series_c_flights.sh` and `run_stagec.sh` (full diagnostic samplers).
+  - At the user's request (no waiting except when necessary; no recording unless chasing an issue), flights 3–4 ran through `run_series_c_fast.sh` and `run_stagec_lean.sh` (sha256 `dbcb8acd…bc5c`).
+    - The lean script is the same script with every diagnostic recorder removed; the gates, windows, WSL memory watchdog, observer, pre-flight check, runner and gated stop are unchanged (28 tests, line-subset test).
+    - The fast driver has no fixed gap and no sampler wait; it repeats the host check only while Windows is paging.
+  - **Handover:** SIGINT did not stop the old driver, because bash defers SIGINT while its foreground `sleep` runs. The fail-closed handover therefore started nothing. The old driver was then stopped with SIGTERM to its exact PID while it was only waiting (no stack; flight 3 not started). Flight 2's leftover samplers were stopped by exact PID (10/10 statuses).
+
+| Run | Mode | Variant (target NED) | Windows | Target visible at reset | First detection | Steps | Episode (wall) | Filter slow / stop | Minimum LiDAR | Stand-in prediction |
+|---|---|---|---|---|---|---|---|---|---|---|
+| stagec_c2_sw_ppo | PPO | c2_sw (−4.5, −2.5) | 0.480–0.511× | no | step 21 | 61 | 31.4 s | 0 / 0 | 4.43 m | 81 |
+| stagec_c5_w_ppo | PPO | c5_w (−1.0, −4.5) | 0.480–0.510× | no | step 36 | 66 | 34.8 s | 0 / 0 | 4.47 m | 92 |
+| stagec_c1_ne_ppo | PPO | c1_ne (2.5, 2.5) | 0.462–0.500× | yes (FOV edge) | step 0 | 29 | 20.1 s | 2 / 0 | 2.41 m | 148 |
+| stagec_c2_sw_baseline | baseline | c2_sw (−4.5, −2.5) | 0.460–0.500× | no | step 34 | 101 | 43.2 s | – | 4.45 m | 139 |
+
+- **Checks:** every `check_episode.py` verdict was ok: both world gates passed for the variant, and the runner's `world` record matched it. Guard minimum speed 0.444–0.490×, minimum MemAvailable 1554–1705 MiB, no abort; `close()` 12.4–14.6 s with landing and disarm confirmed; stack stopped every time (no SIGKILL).
+- **Timing:** start-to-start fell from about 12.5 min (flights 1–2) to about 7.2 min (flights 3–4).
+- **Outcome:** 11/11 live PPO successes in total, now at three target positions besides the original, including two where the target started well out of view (c2_sw, c5_w: search and then approach). PPO took 61 steps vs the baseline's 101 at c2_sw. c1_ne repeats the stageb1 field-of-view effect: the live camera saw the target 45° off the nose at reset.
