@@ -52,6 +52,12 @@ observation, so the policy never sees the target's position directly.
   and sha256 equal the selection in the calling shell, and the file is unchanged.
 - **Runner:** logs a `world` event (variant, path, sha256, target NED) before creating the env.
 - **Tests:** `test_world_variants.py`, 38 tests; full suite 507 passed.
+- **Orchestration (outside the repo, not yet run):** `/home/hp/uav_ros_experiments/stagec_prep_20261025/run_stagec.sh
+  <run_name> <c1_ne|c2_sw|c5_w> <passive|ppo|baseline>` (sha256 `4b5287cc…800e`). It is a copy of the flown
+  Stage B script that exports `SAR_WORLD_VARIANT` before anything starts, passes `--world-variant`, adds the
+  consistency gate, and uses the default start heading; `passive` stops after the pre-flight state check.
+  `check_episode.py <log> <episode> <variant> <mode>` adds the variant checks (both world gates passed for this
+  variant; the runner's `world` record matches it). Tests: 28 for the script and 10 checker cases.
 
 ## Candidate target positions (stand-in check, 2026-10-25, offline)
 
