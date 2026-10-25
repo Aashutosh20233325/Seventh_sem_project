@@ -1,5 +1,5 @@
 """Stop-rule check after one series episode (read-only).
-Usage: check_episode.py <run_log> <episode.jsonl or missing> <default|variant> <passive|ppo|baseline> [offset_deg]
+Usage: check_episode.py <run_log> <episode.jsonl or missing> <default|variant> <passive|ppo|baseline|explore> [offset_deg]
 With an offset (Stage B), the start heading reached at reset_done must be within 15 deg of nominal east + offset, and
 mode "baseline" requires that no policy was loaded.
 Prints one line "<class> <detail>" and exits 0 only for class "ok" (flown, success, safe landing, nothing unexpected).
@@ -63,16 +63,37 @@ def classify(run_log, episode, offset_deg=None, mode="ppo"):
         return "stop", f"episode result {end and end.get('reason')}"
     if any(s["info"].get("collision") for s in steps):
         return "stop", "collision flag set"
-    reasons = {s.get("policy", {}).get("reason") for s in steps} if mode != "baseline" else set()
+    if mode == "explore":
+        if not any(r.get("event") == "explorer" and r.get("inner") == "policy" for r in rows):
+            return "stop", "explore mode but no explorer with the policy was set up"
+        if not all("mode" in (s.get("policy") or {}) for s in steps):
+            return "stop", "explore mode but steps without an explorer record"
+    reasons = {filter_reason(s) for s in steps} if mode != "baseline" else set()
     if not reasons <= EXPECTED_FILTER:
         return "stop", f"unexpected filter reasons {sorted(map(str, reasons - EXPECTED_FILTER))}"
     main_kinds = [k for k in kinds if k != "guard_sample"]           # the guard thread may log after close()
     if main_kinds[-2:] != ["close_start", "close_returned"]:
         return "stop", "close() did not return"
-    n_slow = sum(s.get("policy", {}).get("reason") == "slow" for s in steps)
-    n_stop = sum(s.get("policy", {}).get("reason") == "stop" for s in steps)
+    n_slow = sum(filter_reason(s) == "slow" for s in steps)
+    n_stop = sum(filter_reason(s) == "stop" for s in steps)
+    extra = ""
+    if mode == "explore":
+        modes = [(s.get("policy") or {}).get("mode") for s in steps]
+        first_approach = next((k for k, m in enumerate(modes) if m == "APPROACH"), None)
+        extra = f" explore_steps={modes.count('EXPLORE')} first_approach_step={first_approach}"
     return "ok", (f"success steps={len(steps)} slow={n_slow} stop={n_stop} "
-                  f"min_lidar={min(s['min_lidar'] for s in steps):.2f}")
+                  f"min_lidar={min(s['min_lidar'] for s in steps):.2f}{extra}")
+
+
+def filter_reason(step):
+    """The LiDAR safety filter's reason for a step: PPO records it as policy.reason; the explorer as policy.filter,
+    or, while PPO flies the approach, inside policy.inner."""
+    p = step.get("policy") or {}
+    if "mode" not in p:
+        return p.get("reason")
+    if p.get("via") == "inner" or (p.get("mode") == "APPROACH" and "inner" in p):
+        return (p.get("inner") or {}).get("reason")
+    return p.get("filter")
 
 
 
@@ -117,7 +138,7 @@ def classify_stage_c(run_log, episode, variant, mode, offset_deg=None):
 
 if __name__ == "__main__":
     if len(sys.argv) not in (5, 6):
-        print("usage: check_episode.py <run_log> <episode.jsonl> <default|variant> <passive|ppo|baseline> [offset_deg]")
+        print("usage: check_episode.py <run_log> <episode.jsonl> <default|variant> <passive|ppo|baseline|explore> [offset_deg]")
         sys.exit(2)
     offset = float(sys.argv[5]) if len(sys.argv) == 6 and float(sys.argv[5]) != 0 else None
     cls, detail = classify_stage_c(*sys.argv[1:5], offset)

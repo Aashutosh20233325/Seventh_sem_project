@@ -921,7 +921,7 @@ class PX4UAVEnv(gym.Env):
     REPOSITION_WALL_TIMEOUT = 120.0     # s wall ceiling
     STEP_DURATION = 0.1                 # s of simulation time per action
 
-    def __init__(self, terrain_following=False):
+    def __init__(self, terrain_following=False, max_steps=None):
 
         super().__init__()
         self.terrain_following = bool(terrain_following)
@@ -959,7 +959,9 @@ class PX4UAVEnv(gym.Env):
             perception_max_age_s=self.PERCEPTION_MAX_AGE,
         )
 
-        self.max_steps = self.task_config.max_steps
+        # Episode step limit: the task default (600 steps = 60 s of simulation time) unless the caller passes one
+        # (the runner's --max-steps, e.g. 2000 for explorer episodes).
+        self.max_steps = self.task_config.max_steps if max_steps is None else int(max_steps)
         self.current_step = 0
         self._episode_active = False
         # Set (never cleared) when this env first enters a flight phase.

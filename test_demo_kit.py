@@ -125,7 +125,8 @@ def test_arguments_are_validated_before_anything_starts(args):
 @pytest.mark.parametrize("mode, offset, height, expect", [
     ("ppo", "0", "flat", "--policy p.npz"), ("ppo", "180", "flat", "--policy p.npz --start-yaw-offset-deg 180"),
     ("baseline", "0", "flat", ""), ("baseline", "-90", "flat", " --start-yaw-offset-deg -90"), ("passive", "0", "flat", ""),
-    ("ppo", "0", "tf", "--policy p.npz --terrain-following"), ("baseline", "90", "tf", " --start-yaw-offset-deg 90 --terrain-following")])
+    ("ppo", "0", "tf", "--policy p.npz --terrain-following"), ("baseline", "90", "tf", " --start-yaw-offset-deg 90 --terrain-following"),
+    ("explore", "0", "tf", "--policy p.npz --explorer --max-steps 2000 --terrain-following")])
 def test_runner_args_per_mode_offset_and_height(mode, offset, height, expect):
     t = SCRIPT.read_text()
     block = t[t.index('RUNNER_ARGS=""'):t.index('echo "demo:')]
@@ -159,9 +160,12 @@ def test_script_safety_properties():
     t = SCRIPT.read_text()
     code = "\n".join(l.split("#", 1)[0] for l in t.splitlines())
     for bad in ("SIGKILL", "kill -9", "kill -KILL", "pkill", "killall", "ros2 topic pub", "GALLIUM_DRIVER",
-                "--software-rendering", "train_ppo", "stable_baselines3", "final_model.zip", "--max-steps",
+                "--software-rendering", "train_ppo", "stable_baselines3", "final_model.zip",
                 "--no-safety", "--no-filter", "uav_ros_experiments", "typeperf", "run_sampler"):
         assert bad not in code, bad
+    # the episode length changes only for explore mode (approved 2026-10-25), nowhere else
+    assert [l.strip() for l in code.splitlines() if "--max-steps" in l] == \
+        ['[ "$MODE" = explore ] && RUNNER_ARGS="--policy $POLICY --explorer --max-steps 2000"']
     assert code.count("run_target_reaching_episode.py") == 1
     i_run = code.index("run_target_reaching_episode.py")
     assert code.index("if [ $gates_ok -eq 1 ]") < code.index("elif [ $wpass -ne 6 ]") < code.index("marker T_r") \
@@ -180,7 +184,7 @@ def test_procedure_is_the_flown_lean_script_line_for_line():
     extra = strip(SCRIPT.read_text()) - strip(FLOWN_LEAN.read_text())
     allowed_markers = ("NAME=", "case \"$", "[[ \"$NAME\"", "REPO=", "D=$REPO", "if [ \"$VARIANT\" = default ]", "cd \"$REPO\"",
                        "source /opt/ros", "R=runs/", "X=runs/", "FMU_PARSE=$D", "test ! -e $R", "mkdir -p $X",
-                       "POLICY=models/", "[ \"$OFFSET\" != 0 ]", "[ \"$HEIGHT\" = tf ]", "echo \"demo:", ".venv/bin/python tools/isolated_sitl.py start",
+                       "POLICY=models/", "[ \"$OFFSET\" != 0 ]", "[ \"$HEIGHT\" = tf ]", "[ \"$MODE\" = explore ]", "echo \"demo:", ".venv/bin/python tools/isolated_sitl.py start",
                        ".venv/bin/python -u $D/guard_observer.py", "timeout 60 .venv/bin/python $D/measure_light.py",
                        "r=$(python3 $D/evaluate_window.py", "pre=$(python3 $D/preflight_state.py", "echo \"== SUPERVISED DEMO FLIGHT")
     unexplained = [l for l in extra if not l.startswith(allowed_markers)]
@@ -236,3 +240,48 @@ def test_series_driver_has_no_host_check_or_waits():
     code = "\n".join(l.split("#", 1)[0] for l in t.splitlines())
     assert "host_check" not in code and "typeperf" not in code and "sleep" not in code
     assert not (DEMO / "host_check.sh").exists()
+
+
+RUN_LOG_OK = """FLIGHT RUN: FLOWN (runner exit 0: EPISODE RESULT: success)
+PASS: live Gazebo target matches sim/worlds/sar_walls.sdf (sha256 x)
+PASS: world variant None, path
+PASS: fresh landed, at-rest, disarmed telemetry
+stack stopped
+"""
+
+
+def run_runner(*args):
+    """The runner in a fresh process, so torch imported by other tests cannot leak into its torch_loaded record."""
+    return subprocess.run([str(ROOT / ".venv/bin/python"), str(ROOT / "run_target_reaching_episode.py"), *args],
+                          cwd=ROOT, capture_output=True, text=True, timeout=600).returncode
+
+
+def test_checker_accepts_an_explorer_episode_and_reports_its_phases(tmp_path):
+    ep = tmp_path / "episode.jsonl"
+    assert run_runner("--standin", "--explorer", "--policy", "models/e1r_300k_s2/final_policy_numpy.npz",
+                      "--max-steps", "2000", "--log", str(ep)) == 0
+    log = tmp_path / "run.log"
+    log.write_text(RUN_LOG_OK)
+    out = checker(log, ep, "default", "explore", 0)
+    assert out.startswith("ok success") and "explore_steps=" in out and "first_approach_step=" in out, out
+    assert checker(log, ep, "default", "ppo", 0).startswith("ok")          # filter reasons are read the same way
+
+
+def test_checker_refuses_explore_mode_without_an_explorer(tmp_path):
+    ep = tmp_path / "episode.jsonl"
+    run_runner("--standin", "--policy", "models/e1r_300k_s2/final_policy_numpy.npz", "--log", str(ep))
+    log = tmp_path / "run.log"
+    log.write_text(RUN_LOG_OK)
+    assert "no explorer" in checker(log, ep, "default", "explore", 0)
+
+
+def test_max_steps_reaches_the_env_and_is_bounded(tmp_path):
+    import json
+    import run_target_reaching_episode as runner
+    ep = tmp_path / "e.jsonl"
+    runner.main(["--standin", "--max-steps", "1500", "--log", str(ep)])
+    w = next(json.loads(l) for l in ep.read_text().splitlines() if '"event": "world"' in l)
+    assert w["max_steps"] == 1500
+    for bad in ("0", "6000"):
+        with pytest.raises(SystemExit):
+            runner.main(["--standin", "--max-steps", bad, "--log", str(tmp_path / f"x{bad}.jsonl")])

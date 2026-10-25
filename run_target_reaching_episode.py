@@ -475,6 +475,8 @@ def main(argv=None):
                    help="policy behind the always-on LiDAR safety filter: numpy_policy .npz (torch-free, for flight) "
                         "or SB3 PPO .zip (default: baseline controller)")
     args = p.parse_args(argv)
+    if not 1 <= args.max_steps <= 5000:
+        p.error("--max-steps must be within 1..5000")
     if not args.standin and not args.i_confirm_supervised_flight:
         p.error("SITL flight requires --i-confirm-supervised-flight after the runbook gates pass")
     reset_options = None
@@ -508,14 +510,14 @@ def main(argv=None):
         target = sar_task.load_target(world)
         record(log, "world", variant=sar_task.selected_world_variant(), path=str(world),
                sha256=sar_task.file_sha256(world), target_ned=[target.x_ned, target.y_ned],
-               terrain_following=bool(args.terrain_following) and not args.standin)
+               terrain_following=bool(args.terrain_following) and not args.standin, max_steps=args.max_steps)
         if args.standin:
             from sar_standin_env import SarStandInEnv
-            env, guard = SarStandInEnv(), None      # offline: no simulator clock or memory to guard
+            env, guard = SarStandInEnv(max_steps=args.max_steps), None   # offline: no simulator clock or memory
             lidar_age = lambda: 0.0                 # noqa: E731  (stand-in LiDAR is computed every step)
         else:
             from px4_uav_env import PX4UAVEnv
-            env = PX4UAVEnv(terrain_following=args.terrain_following)
+            env = PX4UAVEnv(terrain_following=args.terrain_following, max_steps=args.max_steps)
             guard = RuntimeGuard(px4_telemetry(env), terrain=px4_terrain(env) if args.terrain_following else None)
             lidar_age = env.observation_age
         controller = None if predict is None else PolicyController(predict, lidar_age)
