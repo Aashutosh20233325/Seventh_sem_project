@@ -698,3 +698,16 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Checks:** every `check_episode.py` verdict was ok: both world gates passed for the variant, and the runner's `world` record matched it. Guard minimum speed 0.444–0.490×, minimum MemAvailable 1554–1705 MiB, no abort; `close()` 12.4–14.6 s with landing and disarm confirmed; stack stopped every time (no SIGKILL).
 - **Timing:** start-to-start fell from about 12.5 min (flights 1–2) to about 7.2 min (flights 3–4).
 - **Outcome:** 11/11 live PPO successes in total, now at three target positions besides the original, including two where the target started well out of view (c2_sw, c5_w: search and then approach). PPO took 61 steps vs the baseline's 101 at c2_sw. c1_ne repeats the stageb1 field-of-view effect: the live camera saw the target 45° off the nose at reset.
+
+## Demo kit (tools/demo) live test: 2/2 SUCCESS; remaining test flights cancelled by the user — 2026-10-25 14:36–15:00 UTC
+
+- **Kit:** `80ed7e5` / `f40b56f` on branch `demo-kit`.
+  - `tools/demo/run_demo.sh` is a line-for-line port of the flown `run_stagec_lean.sh`, with repo paths, argument checks and the optional start offset.
+  - `run_demo_series.sh` adds stop rules via `check_episode.py`; the policy is now in `models/e1r_300k_s2/`.
+- **Flights:**
+  - `restart_kittest_1_ppo_default_0`: success, 38 steps.
+  - `restart_kittest2_1_ppo_default_180`: success, 90 steps.
+  - Both landed and disarmed, gated stop with no SIGKILL.
+- **Host check removed:** the first series stopped before flight 2. Its pre-run Windows host check reported about 2,200 pages/s, but this was McAfee (`mc-sustainability`, about 9 MB/s) reading files, not memory pressure (Pages Output/sec 0, 2 GB free, page file flat). At the user's request the host check and every inter-run wait were removed (`f40b56f`); simulation speed stays gated by the six stability windows. The waiting driver was stopped with SIGTERM to its exact PID (no stack running).
+- **Cancelled flights:** the user then asked for no more flights. The second series driver was stopped by exact PID during its first flight; that flight completed and landed normally. The moved-target and baseline test flights were cancelled (both modes flew earlier the same day through the identical procedure).
+- **Report:** `docs/PROJECT_STATE_REPORT.md`, with tag `demo-2026-10-25`.
