@@ -731,3 +731,25 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - **Speed:** about 10 % slower than the default world, still well above the 0.35× floor.
   - **Memory:** the binding constraint. In the hardest world MemAvailable at the pre-flight check was 1355 MiB, about 126 MiB above the runtime guard's 1.2 GiB take-off threshold. The gz GUI (llvmpipe, CPU-rendered) and the server each grew about 220 MiB.
   - **Errors:** the only PX4 errors were two IMU timestamp lines during shutdown.
+
+## 3D step 2: terrain following (option A) — passive checks and live flights — 2026-10-25 16:44–20:46 UTC
+
+- **Code:** branch `terrain-following`.
+  - `41f41c0`: downward single-beam range `agl_rangefinder` (not PX4's `lidar_sensor_link` name, so EKF2 is unchanged), bridged to `/uav/agl_range`, and env terrain following (off by default; `--terrain-following`, `run_demo.sh … tf`).
+  - `54b5d61`: runtime-guard abort, armed after reset: below 0.4 m height above ground, range older than 1 s, or no return.
+  - `c1d0bc3`: world `gen_l2_s10`.
+- **Passive checks:**
+  - `tfpass_1` (normal world): PASS; the downward range read **0.177 m** on the pad.
+  - `gen_l2_s1`: stopped twice by the observer's 1.2 GiB MemAvailable floor (window 2 at 1229 MiB; window 5 at 1212 MiB). An old suspended background process (state T, about 410 MiB) was holding memory; the user closed it from the terminal.
+- **Live flights (PPO E1R 300k s2, numpy, filter):**
+
+| Run | World | Result | Height above ground | Notes |
+|---|---|---|---|---|
+| `tflive_1` | normal (flat) | success, 39 steps | 1.63–1.78 m (same pattern as non-TF flights) | terrain readings all ok in flight; too_low only during landing |
+| `tflive2_1` | gen_l1_s1 | success, 172 steps | 1.62–1.82 m | the route crossed flat ground (relief 0.06 m), so hills were not exercised; MemAvailable min 1173 MiB in flight |
+| `tfhill_1` | **gen_l2_s10** (+0.38 m hill on the route) | **success, 96 steps** | **1.77 m flat, 1.74 m over the hill** | altitude above take-off rose to 2.17 m over the 0.39 m hill (corr(altitude, ground) 0.87); transient 1.60/1.93 m from the 0.5 m/s rate limit; pre-flight MemAvailable 1572, min 1335 MiB |
+
+- **Findings:**
+  - Terrain following works live and changes nothing on flat ground.
+  - Level 2 fits on this laptop when WSL starts with about 3.7 GB free (with an extra 400 MiB process it did not).
+  - The return-to-start after success uses the fixed take-off height (not terrain following): about 1.4 m above ground over this hill.
