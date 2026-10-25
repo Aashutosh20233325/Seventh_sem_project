@@ -34,6 +34,9 @@ SITL runs add a runtime guard (RuntimeGuard), which can only stop an episode ear
   lower of the PX4 HRT clock (TimesyncStatus timestamp + estimated_offset, ~1 sample per simulated second)
   and the camera image-stamp clock ("guard_abort"). PX4 local-position stamps are not used for speed: PX4
   slews them toward wall time after each DDS timesync reset.
+- With --terrain-following, from the end of reset() (airborne, at the start point) it also aborts when the
+  downward range shows less than 0.4 m height above the ground ("terrain_too_low"), is older than 1 s or
+  missing ("terrain_stale"), or finds no ground ("terrain_no_return").
 - PX4 liveness is checked separately: local-position receipt must be <= 1.0 s old. The HRT clock is stale
   after MAX_SAMPLE_GAP_S without progress, and "stalled" if the camera clock advanced >= 2 simulated
   seconds since the last HRT progress (the simulation runs but PX4 time does not). A slow simulation
@@ -84,6 +87,8 @@ PX4_HRT_STALL_CAMERA_S = 2.0
 SAMPLE_PERIOD_S = 1.0
 LOG_SAMPLE_PERIOD_S = 5.0
 PREFLIGHT_WAIT_S = 60.0         # wall time allowed for the first full speed window
+TERRAIN_MIN_AGL_M = 0.4         # terrain following: abort below this height above the ground (low rubble gives >= 0.7)
+AGL_MAX_AGE_S = 1.0             # terrain following: abort if the downward range is older than this
 POLICY_TORCH_THREADS = 1        # policy inference only; leave the CPU to the simulator
 
 _log_lock = threading.Lock()
@@ -99,6 +104,17 @@ def mem_available_mib(path="/proc/meminfo"):
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+
+def px4_terrain(env):
+    """terrain() -> (downward range m or None, receipt monotonic or None, roll, pitch) from PX4UAVEnv's node."""
+    node = env.node
+
+    def read():
+        with node.condition:
+            return node.agl_range, node.agl_received_at, node.roll, node.pitch
+
+    return read
 
 
 def px4_telemetry(env):
@@ -132,9 +148,13 @@ class RuntimeGuard:
 
     STREAMS = {"px4": PX4_HRT_MAX_AGE_S, "camera": CAMERA_MAX_AGE_S}
 
-    def __init__(self, telemetry, memory=mem_available_mib, clock=time.monotonic):
+    def __init__(self, telemetry, memory=mem_available_mib, clock=time.monotonic, terrain=None):
         self.telemetry = telemetry
         self.memory = memory
+        # Terrain following only: terrain() -> (agl_range m or None, received_at monotonic or None, roll, pitch).
+        # The check is armed by enable_terrain_check() after take-off, never on the ground (the range is ~0.2 m there).
+        self.terrain = terrain
+        self.terrain_check_enabled = False
         self.clock = clock
         self.samples = {name: deque() for name in self.STREAMS}
         self.px4_link_at = None
@@ -201,10 +221,27 @@ class RuntimeGuard:
         after = [sim for received, sim in camera if received >= last_px4_at]
         return bool(after) and after[-1] - after[0] >= PX4_HRT_STALL_CAMERA_S
 
+    def enable_terrain_check(self):
+        if self.terrain is not None:
+            self.terrain_check_enabled = True
+
+    def _terrain_status(self, now):
+        """(status, vertical AGL m or None, age s or None): ok | stale | no_return | too_low."""
+        agl, received_at, roll, pitch = self.terrain()
+        if received_at is None or now - received_at > AGL_MAX_AGE_S:
+            return "stale", None, None if received_at is None else now - received_at
+        if agl is None:
+            return "no_return", None, now - received_at
+        vertical = agl * math.cos(roll) * math.cos(pitch)
+        return ("too_low" if vertical < TERRAIN_MIN_AGL_M else "ok"), vertical, now - received_at
+
     def check(self, memory_floor_mib=MEM_FLOOR_MIB):
         self.sample()
         now = self.clock()
         memory = self.memory()
+        terrain_status = agl_m = agl_age_s = None
+        if self.terrain_check_enabled:
+            terrain_status, agl_m, agl_age_s = self._terrain_status(now)
         with self._lock:
             link_status = self._px4_link_status(now)
             px4_rate, px4_status = self._rate("px4", now)
@@ -220,6 +257,9 @@ class RuntimeGuard:
                            "camera_max_age_s": CAMERA_MAX_AGE_S, "max_sample_gap_s": MAX_SAMPLE_GAP_S,
                            "px4_hrt_max_age_s": PX4_HRT_MAX_AGE_S, "px4_hrt_stall_camera_s": PX4_HRT_STALL_CAMERA_S},
         }
+        if self.terrain_check_enabled:
+            verdict.update(terrain_status=terrain_status, agl_m=agl_m, agl_age_s=agl_age_s)
+            verdict["thresholds"].update(terrain_min_agl_m=TERRAIN_MIN_AGL_M, agl_max_age_s=AGL_MAX_AGE_S)
         if link_status == "ok" and px4_status == "ok" and camera_status == "ok":
             verdict["speed"] = min(px4_rate, camera_rate)
         if memory is None:
@@ -236,6 +276,8 @@ class RuntimeGuard:
             verdict["reason"] = f"camera_clock_{camera_status}"
         elif verdict["speed"] < SPEED_FLOOR:
             verdict["reason"] = "speed_below_floor"
+        elif terrain_status not in (None, "ok"):
+            verdict["reason"] = f"terrain_{terrain_status}"
         else:
             verdict["ok"] = True
         return verdict
@@ -375,6 +417,8 @@ def run(env, log, max_steps, guard=None, controller=None, reset_options=None):
     record(log, "reset_start", options=reset_options)
     obs, info = env.reset(options=reset_options) if reset_options else env.reset()
     record(log, "reset_done", fields=obs_fields(obs), info=info)
+    if guard is not None and hasattr(guard, "enable_terrain_check"):
+        guard.enable_terrain_check()             # airborne now: the height-above-ground abort applies from here
     result = None
     for step in range(max_steps):
         if guard is not None:
@@ -469,7 +513,7 @@ def main(argv=None):
         else:
             from px4_uav_env import PX4UAVEnv
             env = PX4UAVEnv(terrain_following=args.terrain_following)
-            guard = RuntimeGuard(px4_telemetry(env))
+            guard = RuntimeGuard(px4_telemetry(env), terrain=px4_terrain(env) if args.terrain_following else None)
             lidar_age = env.observation_age
         controller = None if predict is None else PolicyController(predict, lidar_age)
         reason = execute(env, log, args.max_steps, guard, controller, reset_options)

@@ -136,3 +136,98 @@ def test_runner_flag_is_recorded(tmp_path):
     runner.main(["--standin", "--terrain-following", "--log", str(log)])
     w = next(json.loads(l) for l in log.read_text().splitlines() if '"event": "world"' in l)
     assert w["terrain_following"] is False                         # the stand-in has no terrain to follow
+
+
+# ---------- runtime-guard abort (terrain following only) ----------
+
+import run_target_reaching_episode as runner
+from test_run_target_reaching_episode import Clock, Feed
+
+
+def terrain_guard(agl=1.8, age=0.1, roll=0.0, pitch=0.0):
+    clock = Clock()
+    feed = Feed(clock)
+    state = {"agl": agl, "age": age, "roll": roll, "pitch": pitch}
+    terrain = lambda: (state["agl"], None if state["age"] is None else clock.t - state["age"], state["roll"], state["pitch"])  # noqa: E731
+    guard = runner.RuntimeGuard(feed, memory=lambda: 2000.0, clock=clock, terrain=terrain)
+    feed.run(guard, 30)                                            # healthy clocks at 0.4x
+    return guard, state
+
+
+def test_the_terrain_check_is_off_until_enabled_so_the_ground_preflight_passes():
+    guard, state = terrain_guard(agl=0.2)                          # sitting on the pad
+    assert guard.check()["ok"] and "terrain_status" not in guard.check()
+    assert guard.preflight()["ok"]
+
+
+@pytest.mark.parametrize("state_kw, reason", [
+    ({"agl": 0.35}, "terrain_too_low"),
+    ({"agl": 0.5, "roll": 0.5, "pitch": 0.5}, "terrain_too_low"),   # 0.5 * cos(0.5)^2 = 0.385 m vertical
+    ({"age": 1.5}, "terrain_stale"),
+    ({"age": None}, "terrain_stale"),
+    ({"agl": None}, "terrain_no_return"),
+])
+def test_enabled_terrain_check_aborts_when_too_low_stale_or_blind(state_kw, reason):
+    guard, state = terrain_guard()
+    guard.enable_terrain_check()
+    assert guard.check()["ok"]
+    state.update(state_kw)
+    v = guard.check()
+    assert not v["ok"] and v["reason"] == reason
+    assert v["thresholds"]["terrain_min_agl_m"] == 0.4 and v["thresholds"]["agl_max_age_s"] == 1.0
+
+
+def test_low_rubble_does_not_abort():
+    guard, state = terrain_guard(agl=0.7)                          # 1.8 m over a 1.1 m rubble block
+    guard.enable_terrain_check()
+    v = guard.check()
+    assert v["ok"] and v["terrain_status"] == "ok" and v["agl_m"] == pytest.approx(0.7)
+
+
+def test_no_terrain_source_means_no_terrain_check():
+    clock = Clock()
+    feed = Feed(clock)
+    guard = runner.RuntimeGuard(feed, memory=lambda: 2000.0, clock=clock)
+    feed.run(guard, 30)
+    guard.enable_terrain_check()
+    assert guard.check()["ok"] and not guard.terrain_check_enabled
+
+
+class TerrainEnv:
+    """Stand-in episode whose guard terrain reading drops to 0.3 m after a few steps."""
+
+    def __init__(self, state, after=5):
+        from sar_standin_env import SarStandInEnv
+        self.env, self.state, self.after, self.steps, self.closes = SarStandInEnv(), state, after, 0, 0
+
+    def reset(self):
+        return self.env.reset()
+
+    def step(self, action):
+        self.steps += 1
+        if self.steps >= self.after:
+            self.state["agl"] = 0.3
+        return self.env.step(action)
+
+    def close(self):
+        self.closes += 1
+
+
+def test_runner_arms_the_check_after_reset_and_lands_on_a_low_reading(tmp_path):
+    import json
+    guard, state = terrain_guard(agl=0.2)                          # on the ground during the preflight
+    guard.start = lambda log: None
+    env = TerrainEnv(state)
+    original_reset = env.reset
+
+    def reset():
+        state["agl"] = 1.8                                         # airborne at the start point
+        return original_reset()
+    env.reset = reset
+    log_path = tmp_path / "e.jsonl"
+    with log_path.open("x") as log:
+        assert runner.execute(env, log, 600, guard) == "guard_abort"
+    recs = [json.loads(l) for l in log_path.read_text().splitlines()]
+    abort = next(r for r in recs if r["event"] == "guard_abort")
+    assert abort["reason"] == "terrain_too_low" and env.closes == 1
+    assert [r["event"] for r in recs][-3:] == ["episode_end", "close_start", "close_returned"]
