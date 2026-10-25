@@ -1,4 +1,7 @@
-# Stage C plan: live PPO episodes with different target positions (proposal; nothing implemented)
+# Stage C plan: live PPO episodes with different target positions
+
+**Status (2026-10-25):** the mechanism is implemented and tested offline (steps 1 and 4 below; see
+"Implementation"). No live run has used a variant yet. Passive readiness runs and flights need separate approval.
 
 **Goal:** show live that the policy finds and reaches the target where it is, not only at the one position used in
 all 7 live episodes so far (NED (−3, 3)). Stages A and B showed repeatability and search from turned start headings.
@@ -31,6 +34,24 @@ observation, so the policy never sees the target's position directly.
    - refusal of unknown variants;
    - the gate and the env agree on the target;
    - the default behaviour is byte-identical without a variant.
+
+## Implementation (offline, 2026-10-25)
+
+- **Selector:** `sar_task.selected_world_sdf()` / `selected_world_variant()` read `SAR_WORLD_VARIANT` at call time;
+  `load_target()` without a file uses the selection. Names must match `[a-z0-9][a-z0-9_]*`, and unknown or empty
+  values raise.
+- **Variants:** `sim/worlds/variants/{c1_ne,c2_sw,c5_w}/sar_walls.sdf`, written by `tools/make_world_variant.py`. It
+  changes only the target pose and adds a header comment, refuses targets that fail `valid_random_target`, and never
+  overwrites. A test regenerates each file and requires a byte-identical result.
+- **Launcher:** `tools/isolated_sitl.py start --world-variant <name>` refuses the start before creating anything unless
+  `SAR_WORLD_VARIANT` names the same variant (or both are unset), and only for a project-asset profile. It points
+  `PX4_GZ_WORLDS` (server and GUI env files) at the variant directory, and records `world_variant`, `world_sdf` and
+  `world_sdf_sha256` in `processes.json`. Without the flag the generated files are identical to before.
+- **Gates:** `tools/verify_world_target.py` compares the live pose with the selected world and names the file and
+  hash. The new `tools/verify_world_consistency.py --run-dir <run>` fails closed unless the manifest's variant, file
+  and sha256 equal the selection in the calling shell, and the file is unchanged.
+- **Runner:** logs a `world` event (variant, path, sha256, target NED) before creating the env.
+- **Tests:** `test_world_variants.py`, 38 tests; full suite 507 passed.
 
 ## Candidate target positions (stand-in check, 2026-10-25, offline)
 

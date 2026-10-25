@@ -7,12 +7,51 @@ never imports this module.
 
 from __future__ import annotations
 
+import hashlib
 import math
+import os
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-WORLD_SDF = Path(__file__).resolve().with_name("sim") / "worlds" / "sar_walls.sdf"
+SIM_WORLDS = Path(__file__).resolve().with_name("sim") / "worlds"
+WORLD_SDF = SIM_WORLDS / "sar_walls.sdf"          # the default world
+# Stage C: optional world variants, sim/worlds/variants/<name>/sar_walls.sdf, each the default world with only the
+# target pose changed (same world name, so every topic is unchanged). Selected for every process of a run by one
+# environment variable; unset means the default world.
+WORLD_VARIANTS = SIM_WORLDS / "variants"
+WORLD_VARIANT_ENV = "SAR_WORLD_VARIANT"
+_VARIANT_NAME = re.compile(r"[a-z0-9][a-z0-9_]{0,39}")
+
+
+def world_variant_sdf(variant: str) -> Path:
+    """The world file of a named variant; ValueError for a malformed or unknown name."""
+    if not isinstance(variant, str) or not _VARIANT_NAME.fullmatch(variant):
+        raise ValueError(f"malformed world variant name {variant!r}")
+    path = WORLD_VARIANTS / variant / WORLD_SDF.name
+    if not path.is_file():
+        known = sorted(p.name for p in WORLD_VARIANTS.glob("*") if (p / WORLD_SDF.name).is_file())
+        raise ValueError(f"unknown world variant {variant!r}; known: {known}")
+    return path
+
+
+def selected_world_variant(environ=None) -> str | None:
+    """The variant named by SAR_WORLD_VARIANT, None if unset. Set but empty or invalid is an error."""
+    value = (os.environ if environ is None else environ).get(WORLD_VARIANT_ENV)
+    if value is None:
+        return None
+    world_variant_sdf(value)                       # validate
+    return value
+
+
+def selected_world_sdf(environ=None) -> Path:
+    variant = selected_world_variant(environ)
+    return WORLD_SDF if variant is None else world_variant_sdf(variant)
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -24,8 +63,12 @@ class Target:
     radius: float
 
 
-def load_target(world_sdf: Path = WORLD_SDF, name: str = "target") -> Target:
-    """Read the target sphere from the world SDF and convert Gazebo ENU to PX4 NED (x=y_enu, y=x_enu)."""
+def load_target(world_sdf: Path | None = None, name: str = "target") -> Target:
+    """Read the target sphere from the world SDF and convert Gazebo ENU to PX4 NED (x=y_enu, y=x_enu).
+
+    Without an explicit file this reads the selected world (SAR_WORLD_VARIANT, resolved at call time)."""
+    if world_sdf is None:
+        world_sdf = selected_world_sdf()
     world = ET.parse(world_sdf).getroot().find("world")
     models = [m for m in world.findall("model") if m.get("name") == name]
     if len(models) != 1:

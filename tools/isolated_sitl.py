@@ -53,6 +53,8 @@ TERM_GRACE_SECONDS = 5.0
 # Project-versioned simulation assets (profile "sar_oakd").
 SIM_MODELS = PROJECT / "sim/models"
 SIM_WORLDS = PROJECT / "sim/worlds"
+sys.path.insert(0, str(PROJECT))
+import sar_task  # noqa: E402  (Stage C world variants: one selector for launcher, gate, and runner)
 # PX4's gz server.config minus GstCameraSystem (UDP H.264 streaming of the first RGB camera).
 SIM_SERVER_CONFIG = PROJECT / "sim/server_no_gstreamer.config"
 # ROS names for the camera; the gz depth topics are global ("/depth_camera",
@@ -220,9 +222,11 @@ def ros_environment(
 
 
 def gz_env_script(
-    profile: Profile = LEGACY, px4_server_config: bool = False, software_rendering: bool = False
+    profile: Profile = LEGACY, px4_server_config: bool = False, software_rendering: bool = False,
+    worlds_dir: Path | None = None,
 ) -> bytes:
     """PX4's generated gz_env.sh, plus project asset paths (and server config) for project profiles."""
+    worlds_dir = SIM_WORLDS if worlds_dir is None else worlds_dir
     script = PX4_GZ_ENV.read_bytes()
     if not profile.project_assets:
         return script
@@ -230,9 +234,9 @@ def gz_env_script(
         "\n# --- uav_ros project assets (tools/isolated_sitl.py profile "
         f"{profile.name}) ---\n"
         f"export PX4_GZ_MODELS={shlex.quote(str(SIM_MODELS))}\n"
-        f"export PX4_GZ_WORLDS={shlex.quote(str(SIM_WORLDS))}\n"
+        f"export PX4_GZ_WORLDS={shlex.quote(str(worlds_dir))}\n"
         f"export GZ_SIM_RESOURCE_PATH={shlex.quote(str(SIM_MODELS))}:"
-        f"{shlex.quote(str(SIM_WORLDS))}:$GZ_SIM_RESOURCE_PATH\n"
+        f"{shlex.quote(str(worlds_dir))}:$GZ_SIM_RESOURCE_PATH\n"
     )
     if profile.server_config is not None and not px4_server_config:
         override += f"export GZ_SIM_SERVER_CONFIG_PATH={shlex.quote(str(profile.server_config))}\n"
@@ -245,9 +249,9 @@ def gz_env_script(
     return script + override.encode()
 
 
-def gz_gui_env_script(profile: Profile, px4_server_config: bool = False) -> bytes:
+def gz_gui_env_script(profile: Profile, px4_server_config: bool = False, worlds_dir: Path | None = None) -> bytes:
     """Split rendering: the server's gz_env.sh content without the d3d12 lines, pinned to llvmpipe."""
-    return gz_env_script(profile, px4_server_config, software_rendering=True) + (
+    return gz_env_script(profile, px4_server_config, software_rendering=True, worlds_dir=worlds_dir) + (
         "\n# --- split rendering: this file is sourced only by the launcher-owned gz GUI ---\n"
         "export GALLIUM_DRIVER=llvmpipe\nunset MESA_D3D12_DEFAULT_ADAPTER_NAME\nunset LIBGL_ALWAYS_SOFTWARE\n"
     ).encode()
@@ -382,7 +386,8 @@ def _assert_domain_and_partition_unused(env: dict[str, str]) -> None:
         )
 
 
-def _check_paths(run_dir: Path, profile: Profile = LEGACY) -> None:
+def _check_paths(run_dir: Path, profile: Profile = LEGACY, worlds_dir: Path | None = None) -> None:
+    worlds_dir = SIM_WORLDS if worlds_dir is None else worlds_dir
     if not PX4_BINARY.is_file() or not os.access(PX4_BINARY, os.X_OK):
         raise IsolationError(f"PX4 SITL binary is unavailable: {PX4_BINARY}")
     required = [PX4_DATA, PX4_GZ_ENV, XRCE_AGENT, ROS_SETUP, ROS_OVERLAY, ROS2, PYTHON]
@@ -390,7 +395,7 @@ def _check_paths(run_dir: Path, profile: Profile = LEGACY) -> None:
         required.append(profile.server_config)
     if profile.project_assets:
         required += [
-            SIM_WORLDS / f"{profile.world}.sdf",
+            worlds_dir / f"{profile.world}.sdf",
             SIM_MODELS / profile.sim_model.removeprefix("gz_") / "model.sdf",
         ]
     for path in required:
@@ -410,6 +415,7 @@ def _prepare_run_dir(
     px4_server_config: bool = False,
     software_rendering: bool = False,
     split_rendering: bool = False,
+    worlds_dir: Path | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
     rootfs = run_dir / "px4_rootfs"
@@ -417,10 +423,10 @@ def _prepare_run_dir(
     # PX4's local gz startup script sources ./gz_env.sh from its working dir.
     # Copy the configuration, never link writable PX4 storage to the shared tree.
     (rootfs / "gz_env.sh").write_bytes(
-        gz_env_script(profile, px4_server_config, software_rendering)
+        gz_env_script(profile, px4_server_config, software_rendering, worlds_dir)
     )
     if split_rendering:
-        (run_dir / GUI_ENV_FILE).write_bytes(gz_gui_env_script(profile, px4_server_config))
+        (run_dir / GUI_ENV_FILE).write_bytes(gz_gui_env_script(profile, px4_server_config, worlds_dir))
     (run_dir / "logs").mkdir()
 
 
@@ -498,25 +504,54 @@ def _verified_record(record: dict[str, Any]) -> bool:
     )
 
 
+def resolve_world(profile: Profile, world_variant: str | None, environ=None) -> tuple[Path | None, Path | None]:
+    """(PX4_GZ_WORLDS directory, None = default, and the world file) for a start; IsolationError if inconsistent.
+
+    A variant needs a project-asset profile, and SAR_WORLD_VARIANT in the launcher's environment (inherited by
+    every gate and the runner started from the same shell) must name the same variant, or be unset with no
+    variant, so that launcher, world-target gate and runner read one world file.
+    """
+    environ = os.environ if environ is None else environ
+    env_value = environ.get(sar_task.WORLD_VARIANT_ENV)
+    if env_value != world_variant:
+        raise IsolationError(
+            f"{sar_task.WORLD_VARIANT_ENV}={env_value!r} in the environment but --world-variant {world_variant!r}; "
+            "set both to the same variant (or neither)"
+        )
+    if not profile.project_assets:
+        if world_variant is not None:
+            raise IsolationError("--world-variant needs a project-asset profile (sar_oakd)")
+        return None, None
+    if world_variant is None:
+        return None, sar_task.WORLD_SDF
+    try:
+        sdf = sar_task.world_variant_sdf(world_variant)
+    except ValueError as exc:
+        raise IsolationError(str(exc)) from exc
+    return sdf.parent, sdf
+
+
 def start(
     run_dir: Path,
     profile: Profile = LEGACY,
     px4_server_config: bool = False,
     software_rendering: bool = False,
     split_rendering: bool = False,
+    world_variant: str | None = None,
 ) -> None:
+    worlds_dir, world_sdf = resolve_world(profile, world_variant)
     if split_rendering and (not profile.camera or software_rendering):
         raise IsolationError(
             "--split-rendering needs a camera profile with GPU server rendering "
             "(not the legacy profile, not --software-rendering)"
         )
     run_dir = run_dir.resolve()
-    _check_paths(run_dir, profile)
+    _check_paths(run_dir, profile, worlds_dir)
     _assert_endpoint_free(XRCE_PORT)
     env_base = sourced_environment()
     env_ros = ros_environment(env_base, profile=profile)
     _assert_domain_and_partition_unused(env_ros)
-    _prepare_run_dir(run_dir, profile, px4_server_config, software_rendering, split_rendering)
+    _prepare_run_dir(run_dir, profile, px4_server_config, software_rendering, split_rendering, worlds_dir)
 
     manifest: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -541,6 +576,9 @@ def start(
             else "Mesa default (llvmpipe under WSLg)"
         ),
         "world": profile.world,
+        "world_variant": world_variant,
+        "world_sdf": str(world_sdf) if world_sdf is not None else None,
+        "world_sdf_sha256": sar_task.file_sha256(world_sdf) if world_sdf is not None else None,
         "model": profile.sim_model,
         "components": {},
     }
@@ -840,6 +878,12 @@ def main(argv: list[str] | None = None) -> int:
         "(reverts to the default llvmpipe CPU renderer)",
     )
     parser.add_argument(
+        "--world-variant",
+        default=None,
+        help="start only (project profile): Stage C world variant sim/worlds/variants/<name>/sar_walls.sdf "
+        f"(only the target pose differs); {sar_task.WORLD_VARIANT_ENV} must be set to the same name",
+    )
+    parser.add_argument(
         "--split-rendering",
         action="store_true",
         help="start only (camera profile): gz server and cameras on Mesa d3d12/NVIDIA; the gz GUI "
@@ -854,6 +898,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.px4_server_config,
                 args.software_rendering,
                 args.split_rendering,
+                args.world_variant,
             )
         elif args.command == "status":
             status(args.run_dir)

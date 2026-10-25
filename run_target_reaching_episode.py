@@ -60,6 +60,7 @@ from pathlib import Path
 import numpy as np
 
 import sar_observation as so
+import sar_task
 from baseline_controller import BaselineController
 from safety_layer import LidarSafetyFilter
 
@@ -454,6 +455,10 @@ def main(argv=None):
                    torch_threads=None if numpy_meta else POLICY_TORCH_THREADS, mem_available_mib=mem_available_mib(),
                    safety_filter={"stop_clearance_m": f.stop_clearance, "slow_clearance_m": f.slow_clearance,
                                   "emergency_clearance_m": f.emergency_clearance, "max_age_s": f.max_age_s})
+        world = sar_task.selected_world_sdf()       # Stage C: SAR_WORLD_VARIANT, unset = default world
+        target = sar_task.load_target(world)
+        record(log, "world", variant=sar_task.selected_world_variant(), path=str(world),
+               sha256=sar_task.file_sha256(world), target_ned=[target.x_ned, target.y_ned])
         if args.standin:
             from sar_standin_env import SarStandInEnv
             env, guard = SarStandInEnv(), None      # offline: no simulator clock or memory to guard

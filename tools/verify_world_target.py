@@ -2,7 +2,8 @@
 """Read-only startup gate: the running Gazebo target must match the versioned ground truth.
 
 Compares the live pose of model ``target`` (gz /world/<world>/pose/info, ENU) with
-sar_task.load_target() from sim/worlds/sar_walls.sdf. Privileged tooling only; nothing here feeds
+sar_task.load_target() from the selected world file: sim/worlds/sar_walls.sdf, or the Stage C variant named by
+SAR_WORLD_VARIANT. Privileged tooling only; nothing here feeds
 the policy. Exit code 0 = consistent, 1 = mismatch or missing.
 """
 
@@ -60,11 +61,17 @@ def main(argv: list[str] | None = None) -> int:
         ["gz", "topic", "-e", "-n", "1", "-t", f"/world/{args.world}/pose/info"],
         capture_output=True, text=True, timeout=15,
     )
-    errors = check(parse_pose_info(result.stdout), sar_task.load_target())
+    try:
+        world_sdf = sar_task.selected_world_sdf()
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    errors = check(parse_pose_info(result.stdout), sar_task.load_target(world_sdf))
     for error in errors:
         print(f"FAIL: {error}")
+    where = f"{world_sdf.relative_to(sar_task.SIM_WORLDS.parents[1])} (sha256 {sar_task.file_sha256(world_sdf)[:12]})"
     if not errors:
-        print("PASS: live Gazebo target matches sim/worlds/sar_walls.sdf")
+        print(f"PASS: live Gazebo target matches {where}")
     return 1 if errors else 0
 
 

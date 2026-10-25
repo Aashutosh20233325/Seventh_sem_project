@@ -145,7 +145,7 @@ def test_standin_episode_with_the_e1r_300k_checkpoint(tmp_path):
     assert runner.main(["--standin", "--policy", str(E1R_300K), "--log", str(path)]) == 0
     recs = events(path)
     kinds = [e["event"] for e in recs]
-    assert kinds[:2] == ["policy_loaded", "reset_start"] and kinds[-2:] == ["close_start", "close_returned"]
+    assert kinds[:3] == ["policy_loaded", "world", "reset_start"] and kinds[-2:] == ["close_start", "close_returned"]
     loaded = recs[0]
     assert loaded["sha256"] == hashlib.sha256(E1R_300K.read_bytes()).hexdigest()
     assert loaded["torch_threads"] == 1 and loaded["safety_filter"]["stop_clearance_m"] == 1.2

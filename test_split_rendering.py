@@ -43,7 +43,7 @@ def harness(monkeypatch, tmp_path):
 
     base = {"PATH": "/usr/bin:/bin", "HOME": "/home/hp", "GALLIUM_DRIVER": "d3d12",
             "MESA_D3D12_DEFAULT_ADAPTER_NAME": "NVIDIA", "LIBGL_ALWAYS_SOFTWARE": "0"}
-    monkeypatch.setattr(iso, "_check_paths", lambda run_dir, profile=None: None)
+    monkeypatch.setattr(iso, "_check_paths", lambda run_dir, profile=None, worlds_dir=None: None)
     monkeypatch.setattr(iso, "_assert_endpoint_free", lambda port: None)
     monkeypatch.setattr(iso, "sourced_environment", lambda domain_id=iso.DOMAIN_ID: dict(base))
     monkeypatch.setattr(iso, "_assert_domain_and_partition_unused", lambda env: None)
