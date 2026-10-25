@@ -6,7 +6,8 @@ committed (`837a876`). Readiness depends on free memory on the Windows host (see
 supervised PPO flight succeeded** (`restart_20261025_ppo1`, code `1fac16b`): E1R 300k seed 2 as a torch-free numpy
 export behind the LiDAR safety filter, target reached in 38 steps, landed and disarmed. That is one episode, not a
 reliability measure. No flight is authorized by this document. Every
-step that could arm or take off is marked **DO NOT RUN WITHOUT EXPLICIT APPROVAL**. Detailed procedure and history:
+step that could arm or take off is marked **DO NOT RUN WITHOUT EXPLICIT APPROVAL**. Step-by-step PPO demo procedure:
+`docs/PPO_DEMO_RUNBOOK.md`; next stage (target positions): `docs/STAGE_C_PLAN.md`. Detailed procedure and history:
 `runs/sar_demo_20261018/RUNBOOK_ISOLATED.md` and `runs/sar_demo_20261018/worklog.md`.
 
 ## What the demo is
