@@ -49,6 +49,11 @@ drops to 0.25–0.31× (`restart_20261024_hostmem1`, 0/6 windows). With Chrome c
 Inside WSL, MemAvailable falls about 60–70 MiB/min while Gazebo runs (the gz server grows), so start the episode soon
 after the windows.
 
+Between live runs, wait at least 2–3 minutes after the stack stops, then repeat the host check. Shutdown causes a
+paging burst on Windows (WSL hands memory back, Defender scans the new logs). It usually settles within 30–60 s, but
+once (`restart_20261025_ppo3`) about 2,200 pages/s lasted about 10 minutes. Flights themselves showed little paging
+(medians 1–15 pages/s).
+
 ## Diagnosing rendering overhead without system changes
 
 | Option | Status |

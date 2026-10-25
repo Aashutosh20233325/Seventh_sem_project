@@ -612,3 +612,30 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Runtime guard:** never aborted. Its non-OK samples were warm-up only (5 `px4_clock_insufficient_history`, 1 `px4_clock_missing`) before its preflight; minimum speed 0.483×, minimum MemAvailable 1519 MiB.
 - **Stop:** attempt 1 confirmed fresh landed, at-rest and disarmed telemetry, then was incomplete (PX4/gz, no SIGKILL); attempts 2–5 refused (no telemetry); "stack stopped". QGroundControl left running.
 - **Outcome:** first live PPO episode: 38 steps against the baseline's 64 in the same world. One episode at one fixed start and target is a demonstration, not a reliability measure; the policy has been validated statistically only in the stand-in.
+
+## Stage A: PPO repeatability series, 3 more episodes: 3/3 SUCCESS — 2026-10-25 10:20–10:59 UTC
+
+- **Approval and setup:** the user approved several supervised PPO episodes. Stage A repeats the ppo1 setup exactly: code `1fac16b` (clean tree), the same pinned policy (E1R 300k seed 2, numpy, sha256 `fbcacf93…0511`), the same start and target, and a fresh stack per episode via the unchanged `run_ppo_flight.sh` (sha256 `03297200…7473`).
+- **Orchestration:** `/home/hp/uav_ros_experiments/ppo_flight_20261025/`.
+  - `run_series.sh`: before each episode it waits for the previous run's samplers, then checks for no stack, QGroundControl running, a clean tree, the script hash, and a 20 s host baseline (median below 500 pages/s, page file below 10%).
+  - `check_episode.py`: the stop rules. It stops on a collision, guard refusal or abort, a result other than success, an unexpected filter reason (anything but `slow`/`stop`), torch loaded, no confirmed landing, or the stack not stopped. A readiness failure stops only if it happens twice in a row. Validated on ppo1 and on 10 synthetic failure cases.
+- **Series run:**
+  - `restart_20261025_ppo2` and `ppo3` flew.
+  - Before `ppo4` the host check found about 2,100 pages/s and the series **stopped without starting anything**.
+  - Paging settled (about 1 page/s at 10:49), and `ppo4` was run separately with the same checks after the user approved it.
+
+| Run | Windows | Steps | Episode (wall) | Filter slow / stop | Minimum LiDAR | Guard minimum speed / MemAvailable |
+|---|---|---|---|---|---|---|
+| ppo1 (10:05) | 0.453–0.518× | 38 | 22.0 s | 10 / 0 | 2.18 m | 0.483× / 1519 MiB |
+| ppo2 | 0.483–0.533× | 39 | 22.4 s | 10 / 0 | 2.20 m | 0.500× / 1588 MiB |
+| ppo3 | 0.483–0.517× | 41 | 23.0 s | 11 / 0 | 2.14 m | 0.502× / 1602 MiB |
+| ppo4 | 0.473–0.532× | 38 | 22.6 s | 9 / 0 | 2.19 m | 0.483× / 1446 MiB |
+
+- **All four PPO episodes:** success. Target first detected at step 2–3; maximum LiDAR age 0.10–0.18 s; `reset()` 18.5–19.9 s; `close()` 12.3–13.4 s with landing and disarm confirmed; no guard abort. Every gated stop confirmed landed and disarmed on attempt 1, then followed the known incomplete-then-self-exit pattern (no SIGKILL).
+- **Windows paging by phase** (`phase_paging.py`, 1 s host-memory sampler):
+  - Flight medians 1–15 pages/s.
+  - Startup has short file-load spikes (up to 168k/s) with medians of 31–74.
+  - **Shutdown** is the main source: medians 35–2,368 and maxima up to 84k. In ppo4 the page file went 4.8 → 7.5%, with Defender at 29% and Memory Compression at 18% of a CPU, while the WSL VM's resident memory fell from about 1.7 to 1.1 GB.
+  - After the stop it settled within 30–60 s in ppo1, ppo2 and ppo4. In ppo3 about 2,200 pages/s lasted about 10 minutes with no matching CPU activity; the cause was not identified.
+  - ppo4's Windows samplers were stopped early on request (SIGINT to the exact recorded PIDs at 11:04, about 5 minutes after END). Their raw output is kept; the incomplete last row was excluded from the analysis.
+- **Outcome:** 4/4 live PPO successes from the same start and target, with very consistent behaviour; 38–41 steps against the baseline's 64. This shows repeatability, not generalisation (start and target fixed).
