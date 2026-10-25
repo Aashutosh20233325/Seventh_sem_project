@@ -112,3 +112,20 @@ def test_gazebo_accepts_the_world(name):
     d = sar_task.WORLD_VARIANTS / name
     p = subprocess.run(["gz", "sdf", "-k", "sar_walls.sdf"], cwd=d, capture_output=True, text=True, timeout=60)
     assert "Valid" in p.stdout, p.stdout + p.stderr
+
+
+@pytest.mark.parametrize("name", COMMITTED)
+def test_no_mesh_collision_and_flat_pad_ground(name):
+    """A mesh collision shape segfaults this world's physics (DART/ODE OdeMesh::fillArrays, 2026-10-25): terrain is
+    visual only, and each pad has a thin collision box with its top at height 0 for take-off and landing."""
+    import xml.etree.ElementTree as ET
+    world = ET.parse(sar_task.WORLD_VARIANTS / name / "sar_walls.sdf").getroot().find("world")
+    assert world.findall(".//collision/geometry/mesh") == []
+    assert world.find("model[@name='terrain']").find(".//visual/geometry/mesh/uri").text == "terrain.obj"
+    spec = json.loads((sar_task.WORLD_VARIANTS / name / "spec.json").read_text())
+    for k, (px, py) in enumerate((spec["start_ned"], spec["target_ned"])):
+        m = world.find(f"model[@name='pad_{k}']")
+        x, y, z = map(float, m.findtext("pose").split()[:3])
+        sx, sy, sz = map(float, m.find(".//collision/geometry/box/size").text.split())
+        assert (x, y) == pytest.approx((py, px), abs=1e-3) and z + sz / 2 == pytest.approx(0.0)
+        assert sx == sy == 2 * wg.PAD
