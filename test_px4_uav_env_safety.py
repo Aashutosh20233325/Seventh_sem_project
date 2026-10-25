@@ -2050,7 +2050,7 @@ def test_success_step_terminates_with_privileged_info_only(monkeypatch):
     assert terminated and not truncated and info["reason"] == "success"
     assert reward == pytest.approx(-0.1 + 0.4 + 100.0)
     assert safe_calls == [True]
-    assert set(info["privileged"]) == {"distance_to_target", "target_ned", "x", "y", "z"}
+    assert set(info["privileged"]) == {"distance_to_target", "target_ned", "x", "y", "z", "heading"}
     assert "distance_to_target" not in {k for k in info if k != "privileged"}
 
 

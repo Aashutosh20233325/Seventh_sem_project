@@ -255,11 +255,14 @@ class SarStandInEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed if seed is not None else self._initial_seed)
         self._initial_seed = None
+        offset = sar_task.start_yaw_offset(options)
+        if offset and (self.start_range is not None or self.randomize_start):
+            raise ValueError("start_yaw_offset cannot be combined with a randomized or curriculum start")
         if self.randomize_target:
             self._sample_target()
         if self.randomize_obstacles:
             self._sample_obstacles()
-        self.x, self.y, self.heading = 0.0, 0.0, math.pi / 2
+        self.x, self.y, self.heading = 0.0, 0.0, sar_task.wrap_angle(math.pi / 2 + offset)
         if self.start_range is not None:
             self._sample_curriculum_start()
         elif self.randomize_start:
@@ -372,7 +375,8 @@ class SarStandInEnv(gym.Env):
 
     def _privileged(self):
         return {"distance_to_target": sar_task.horizontal_distance(self.x, self.y, self.target),
-                "target_ned": (self.target.x_ned, self.target.y_ned), "x": self.x, "y": self.y, "z": HOLD_Z}
+                "target_ned": (self.target.x_ned, self.target.y_ned), "x": self.x, "y": self.y, "z": HOLD_Z,
+                "heading": self.heading}
 
     def step(self, action):
         action = np.clip(np.asarray(action, np.float32), self.action_space.low, self.action_space.high)

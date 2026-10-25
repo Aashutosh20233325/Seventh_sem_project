@@ -18,6 +18,10 @@ turn, and LiDAR of unknown or stale age (PX4UAVEnv.observation_age(), wall time 
 malformed policy output, or invalid LiDAR commands a hover. Each step logs the original and applied action and
 the filter's reason. The stand-in computes LiDAR fresh every step, so it uses age 0, as in the evaluations.
 
+--start-yaw-offset-deg turns the start heading from the nominal east heading (NED degrees, positive = clockwise),
+passed to reset(options={"start_yaw_offset": rad}); both envs validate it (sar_task.start_yaw_offset) before
+anything is commanded. Without it the start is unchanged.
+
 Per step it logs wall UTC and monotonic time, the simulation step index, the action, the observation's
 target fields, the reward, and info. Privileged values appear only under "privileged" (evaluation only;
 the controller never sees them). There is never an automatic retry; close() keeps the committed landing
@@ -357,7 +361,7 @@ class PolicyController:
         return action
 
 
-def run(env, log, max_steps, guard=None, controller=None):
+def run(env, log, max_steps, guard=None, controller=None, reset_options=None):
     if controller is None:
         controller = BaselineController()
     if guard is not None:
@@ -367,8 +371,8 @@ def run(env, log, max_steps, guard=None, controller=None):
             record(log, "guard_refuse", reason=verdict["reason"], guard=verdict)
             record(log, "episode_end", reason="guard_refuse")
             return "guard_refuse"
-    record(log, "reset_start")
-    obs, info = env.reset()
+    record(log, "reset_start", options=reset_options)
+    obs, info = env.reset(options=reset_options) if reset_options else env.reset()
     record(log, "reset_done", fields=obs_fields(obs), info=info)
     result = None
     for step in range(max_steps):
@@ -392,12 +396,12 @@ def run(env, log, max_steps, guard=None, controller=None):
     return result
 
 
-def execute(env, log, max_steps, guard=None, controller=None):
+def execute(env, log, max_steps, guard=None, controller=None, reset_options=None):
     """One episode, then always env.close() (landing gates) and stop the guard. Never retries."""
     try:
         if guard is not None:
             guard.start(log)
-        return run(env, log, max_steps, guard, controller)
+        return run(env, log, max_steps, guard, controller, reset_options)
     finally:
         record(log, "close_start")
         if hasattr(env, "close"):
@@ -414,12 +418,20 @@ def main(argv=None):
     p.add_argument("--i-confirm-supervised-flight", action="store_true",
                    help="required for SITL: confirms the runbook preflight gates passed and a human is supervising")
     p.add_argument("--max-steps", type=int, default=600)
+    p.add_argument("--start-yaw-offset-deg", type=float, default=None,
+                   help="turn the start heading by this many degrees from the nominal east heading (NED, positive = "
+                        "clockwise/right, within +-180); default: nominal start")
     p.add_argument("--policy", type=Path,
                    help="policy behind the always-on LiDAR safety filter: numpy_policy .npz (torch-free, for flight) "
                         "or SB3 PPO .zip (default: baseline controller)")
     args = p.parse_args(argv)
     if not args.standin and not args.i_confirm_supervised_flight:
         p.error("SITL flight requires --i-confirm-supervised-flight after the runbook gates pass")
+    reset_options = None
+    if args.start_yaw_offset_deg is not None:
+        if not (math.isfinite(args.start_yaw_offset_deg) and abs(args.start_yaw_offset_deg) <= 180.0):
+            p.error("--start-yaw-offset-deg must be finite and within +-180")
+        reset_options = {"start_yaw_offset": math.radians(args.start_yaw_offset_deg)}
 
     with args.log.open("x") as log:                 # never overwrite an existing log
         predict = None
@@ -452,7 +464,7 @@ def main(argv=None):
             guard = RuntimeGuard(px4_telemetry(env))
             lidar_age = env.observation_age
         controller = None if predict is None else PolicyController(predict, lidar_age)
-        reason = execute(env, log, args.max_steps, guard, controller)
+        reason = execute(env, log, args.max_steps, guard, controller, reset_options)
     print(f"EPISODE RESULT: {reason}", flush=True)
     return 0 if reason == "success" else 1
 

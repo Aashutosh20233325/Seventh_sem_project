@@ -55,6 +55,31 @@ class StepOutcome:
     reason: str | None               # "success", "collision", "timeout", or None
 
 
+RESET_OPTIONS = ("start_yaw_offset",)
+
+
+def start_yaw_offset(options) -> float:
+    """Validated start-heading offset (rad, NED: positive = clockwise) from reset(options), 0.0 if absent.
+
+    Shared by the live env and the stand-in so both interpret it identically. Unknown option keys, a
+    non-finite value or |offset| > pi raise ValueError (fail closed: no episode starts on a bad request).
+    """
+    if not options:
+        return 0.0
+    unknown = set(options) - set(RESET_OPTIONS)
+    if unknown:
+        raise ValueError(f"unknown reset options {sorted(unknown)}; supported: {list(RESET_OPTIONS)}")
+    value = options.get("start_yaw_offset", 0.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+            or abs(value) > math.pi:
+        raise ValueError(f"start_yaw_offset must be a finite angle in [-pi, pi] rad, got {value!r}")
+    return float(value)
+
+
+def wrap_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
 def horizontal_distance(x_ned: float, y_ned: float, target: Target) -> float:
     return math.hypot(target.x_ned - x_ned, target.y_ned - y_ned)
 

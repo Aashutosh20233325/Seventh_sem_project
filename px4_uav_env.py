@@ -1016,6 +1016,7 @@ class PX4UAVEnv(gym.Env):
             "x": self.node.x,
             "y": self.node.y,
             "z": self.node.z,
+            "heading": self.node.heading,
         }
 
     def observation_age(self):
@@ -1438,7 +1439,8 @@ class PX4UAVEnv(gym.Env):
             self.node.condition.notify_all()
 
     def _fly_to_start(self):
-        self._fly_to(self.START_X, self.START_Y, self.node.TAKEOFF_TARGET_Z, self.START_YAW)
+        yaw = getattr(self, "_start_yaw", self.START_YAW)      # set by reset(options); nominal otherwise
+        self._fly_to(self.START_X, self.START_Y, self.node.TAKEOFF_TARGET_Z, yaw)
 
     def _fly_to(self, x, y, z, yaw):
         """Offboard position flight to a pose; bounded in simulation and wall time.
@@ -1758,6 +1760,9 @@ class PX4UAVEnv(gym.Env):
                 )
 
         super().reset(seed=seed)
+        # Validated before anything is commanded: a bad request never takes off.
+        offset = sar_task.start_yaw_offset(options)
+        self._start_yaw = sar_task.wrap_angle(self.START_YAW + offset)
 
         self._episode_active = False
         self.current_step = 0
