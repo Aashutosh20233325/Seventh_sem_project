@@ -22,9 +22,11 @@ under each pad (top at height 0) and a safety plane 0.3 m below the lowest terra
 
 Validity (else the seed is resampled internally and the attempt count recorded): start-target distance 10-18 m;
 pads clear by >= 1.5 m of every obstacle; a grid path from start to target keeping >= 1.5 m from every tall obstacle;
-difficulty 3 additionally requires a tall obstacle across the straight start-target line.
+difficulty 3 additionally requires a tall obstacle across the straight start-target line. hidden=True (names gen_h*)
+additionally requires the target to be hidden from the start: all three sightlines (to the sphere centre and its two
+edges, as in the stand-in's camera-occlusion model) cross a tall obstacle, so it must be found by exploring.
 
-Usage: .venv/bin/python world_generator.py <name> <seed> <difficulty 1-3>
+Usage: .venv/bin/python world_generator.py <name> <seed> <difficulty 1-3> [hidden]
 """
 
 from __future__ import annotations
@@ -227,12 +229,21 @@ def segment_hits_rect(p, q, rect, margin=0.0):
 
 # ---------- generation ----------
 
-def generate(seed: int, difficulty: int) -> dict:
+def target_hidden(start, target, tall):
+    """True if every sightline from start to the target sphere (centre and both edges) crosses a tall obstacle."""
+    dx, dy = target[0] - start[0], target[1] - start[1]
+    d = math.hypot(dx, dy)
+    px, py = -dy / d * TARGET_RADIUS, dx / d * TARGET_RADIUS
+    ends = [target, (target[0] + px, target[1] + py), (target[0] - px, target[1] - py)]
+    return all(any(segment_hits_rect(start, e, b.rect()) for b in tall) for e in ends)
+
+
+def generate(seed: int, difficulty: int, hidden: bool = False) -> dict:
     if difficulty not in LEVELS:
         raise ValueError(f"difficulty must be one of {sorted(LEVELS)}")
     cfg = LEVELS[difficulty]
-    for attempt in range(200):
-        rng = np.random.default_rng([seed, difficulty, attempt])
+    for attempt in range(2000 if hidden else 200):
+        rng = np.random.default_rng([seed, difficulty, attempt] + ([7] if hidden else []))
         dist, ang = rng.uniform(10, 18), rng.uniform(-math.pi, math.pi)
         target = (dist * math.cos(ang), dist * math.sin(ang))
         if max(abs(target[0]), abs(target[1])) > AREA - PAD - 1:
@@ -259,12 +270,15 @@ def generate(seed: int, difficulty: int) -> dict:
             continue
         if cfg["block_line"] and not any(segment_hits_rect(pads[0], target, b.rect()) for b in tall):
             continue
+        if hidden and not target_hidden(pads[0], target, tall):
+            continue
         return {"format": "sar_generated_world_v1", "seed": seed, "difficulty": difficulty, "attempt": attempt,
+                **({"hidden_target": True} if hidden else {}),
                 "area_half_m": AREA, "terrain_step_m": TERRAIN_STEP, "terrain_amplitude_m": cfg["amplitude"],
                 "start_ned": [0.0, 0.0], "target_ned": [round(target[0], 3), round(target[1], 3)],
                 "pad_half_m": PAD, "low_top_m": LOW_TOP, "tall_top_m": TALL_TOP, "clearance_m": CLEARANCE,
                 "terrain_heights": np.round(h, 4).tolist(), "obstacles": [dataclasses.asdict(b) for b in boxes]}
-    raise RuntimeError(f"no valid world for seed {seed} difficulty {difficulty} in 200 attempts")
+    raise RuntimeError(f"no valid world for seed {seed} difficulty {difficulty} hidden {hidden}")
 
 
 # ---------- writers ----------
@@ -335,11 +349,11 @@ def world_sdf(spec, name) -> str:
         + "  </world>\n</sdf>\n"
 
 
-def write(name: str, seed: int, difficulty: int, root: Path | None = None) -> Path:
+def write(name: str, seed: int, difficulty: int, root: Path | None = None, hidden: bool = False) -> Path:
     """Write sim/worlds/variants/<name>/{sar_walls.sdf, terrain.obj, spec.json}; refuses to overwrite."""
     if not sar_task._VARIANT_NAME.fullmatch(name) or not name.startswith("gen_"):
         raise ValueError(f"generated world names must start with gen_ and match {sar_task._VARIANT_NAME.pattern}: {name!r}")
-    spec = generate(seed, difficulty)
+    spec = generate(seed, difficulty, hidden)
     out = (root or sar_task.WORLD_VARIANTS) / name
     out.mkdir(parents=True, exist_ok=False)
     (out / "terrain.obj").write_text(terrain_obj(spec))
@@ -349,10 +363,10 @@ def write(name: str, seed: int, difficulty: int, root: Path | None = None) -> Pa
 
 
 def main(argv):
-    if len(argv) != 4:
+    if len(argv) not in (4, 5) or (len(argv) == 5 and argv[4] != "hidden"):
         print(__doc__, file=sys.stderr)
         return 2
-    out = write(argv[1], int(argv[2]), int(argv[3]))
+    out = write(argv[1], int(argv[2]), int(argv[3]), hidden=len(argv) == 5)
     spec = json.loads((out / "spec.json").read_text())
     kinds = {}
     for b in spec["obstacles"]:

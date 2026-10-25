@@ -430,7 +430,7 @@ def run(env, log, max_steps, guard=None, controller=None, reset_options=None):
                 break
         action = controller.act(obs)
         obs, reward, terminated, truncated, info = env.step(action)
-        policy = {"policy": controller.last} if isinstance(controller, PolicyController) else {}
+        policy = {"policy": controller.last} if hasattr(controller, "last") else {}
         record(log, "step", step=step, action=action, reward=reward, terminated=terminated,
                truncated=truncated, fields=obs_fields(obs), min_lidar=float(np.min(obs[so.SLICES["lidar"]]) * 30),
                info=info, **policy)
@@ -466,6 +466,9 @@ def main(argv=None):
     p.add_argument("--start-yaw-offset-deg", type=float, default=None,
                    help="turn the start heading by this many degrees from the nominal east heading (NED, positive = "
                         "clockwise/right, within +-180); default: nominal start")
+    p.add_argument("--explorer", action="store_true",
+                   help="frontier explorer (explorer.py) until the camera sees the target, then the policy (--policy) or "
+                        "the baseline flies the approach; explorer actions pass the same LiDAR safety filter")
     p.add_argument("--terrain-following", action="store_true",
                    help="SITL only: hold the take-off height above the current ground (downward range, /uav/agl_range)")
     p.add_argument("--policy", type=Path,
@@ -516,6 +519,17 @@ def main(argv=None):
             guard = RuntimeGuard(px4_telemetry(env), terrain=px4_terrain(env) if args.terrain_following else None)
             lidar_age = env.observation_age
         controller = None if predict is None else PolicyController(predict, lidar_age)
+        if args.explorer:
+            from explorer import ExplorerController
+            if args.standin:
+                pose = lambda: (env.x, env.y, env.heading)  # noqa: E731
+            else:
+                def pose():
+                    with env.node.condition:
+                        return env.node.x, env.node.y, env.node.heading
+            inner = controller if controller is not None else BaselineController()
+            controller = ExplorerController(inner, pose, lidar_age=lidar_age)
+            record(log, "explorer", inner="policy" if predict is not None else "baseline")
         reason = execute(env, log, args.max_steps, guard, controller, reset_options)
     print(f"EPISODE RESULT: {reason}", flush=True)
     return 0 if reason == "success" else 1
