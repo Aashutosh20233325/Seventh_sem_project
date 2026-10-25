@@ -103,16 +103,24 @@ def segment_hits_box(x0, y0, x1, y1, box):
     return True
 
 
-def load_walls(world_sdf=sar_task.WORLD_SDF):
-    """Wall boxes as NED rectangles (xmin, xmax, ymin, ymax)."""
+FLYOVER_TOP = 1.1                       # m: boxes whose top is at most this are flown over at the 1.8 m hold height
+
+
+def load_walls(world_sdf=None):
+    """Wall boxes as NED rectangles (xmin, xmax, ymin, ymax) of the selected world (SAR_WORLD_VARIANT, resolved at
+    call time). Boxes the drone flies over (top <= FLYOVER_TOP, e.g. generated rubble) are not walls."""
+    if world_sdf is None:
+        world_sdf = sar_task.selected_world_sdf()
     walls = []
     world = ET.parse(world_sdf).getroot().find("world")
     for model in world.findall("model"):
         box = model.find(".//collision/geometry/box/size")
         if box is None:
             continue
-        x, y = (float(v) for v in model.findtext("pose").split()[:2])
-        sx, sy = (float(v) for v in box.text.split()[:2])
+        x, y, z = (float(v) for v in model.findtext("pose").split()[:3])
+        sx, sy, sz = (float(v) for v in box.text.split()[:3])
+        if z + sz / 2 <= FLYOVER_TOP:
+            continue
         # ENU (x east, y north) -> NED (x north = y_enu, y east = x_enu)
         walls.append((y - sy / 2, y + sy / 2, x - sx / 2, x + sx / 2))
     return walls

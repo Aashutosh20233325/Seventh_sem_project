@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ONE SUPERVISED DEMO RUN (PX4 SITL + Gazebo, split rendering) with every safety gate of the flown procedure.
-# Usage: tools/demo/run_demo.sh <name> <ppo|baseline|passive> [default|c1_ne|c2_sw|c5_w] [0|90|180|-90]
+# Usage: tools/demo/run_demo.sh <name> <ppo|baseline|passive> [default|c1_ne|c2_sw|c5_w|gen_<name>] [0|90|180|-90]
 #   name     lowercase letters/digits/_; run dir runs/sar_demo_20261018/restart_<name>, driver files in ..._driver/
 #   mode     ppo = E1R 300k seed 2 numpy policy behind the LiDAR safety filter; baseline = baseline controller;
 #            passive = everything up to the pre-flight state check, never arms or flies
-#   world    default (sim/worlds/sar_walls.sdf) or a Stage C variant (target moved)
+#   world    default (sim/worlds/sar_walls.sdf), a Stage C variant (target moved) or a generated world
+#            (world_generator.py: rough terrain and obstacles); the launcher refuses unknown names
 #   offset   start-heading offset in degrees (NED, + = clockwise) from the nominal east heading
 # Arms and flies in modes ppo/baseline: run only with explicit approval and a human watching (docs/PPO_DEMO_RUNBOOK.md).
 # Procedure (identical to the flown 2026-10-25 scripts, run_stagec_lean.sh): policy sha256 check; WSL memory watchdog;
@@ -14,7 +15,7 @@
 NAME=${1:-}; MODE=${2:-}; VARIANT=${3:-default}; OFFSET=${4:-0}
 [[ "$NAME" =~ ^[a-z0-9_]{1,60}$ ]] || { echo "NAME REFUSED: '$NAME'"; exit 3; }
 case "$MODE" in passive|ppo|baseline) ;; *) echo "MODE REFUSED: '$MODE' (passive, ppo or baseline)"; exit 3;; esac
-case "$VARIANT" in default|c1_ne|c2_sw|c5_w) ;; *) echo "WORLD REFUSED: '$VARIANT' (default, c1_ne, c2_sw, c5_w)"; exit 3;; esac
+case "$VARIANT" in default|c1_ne|c2_sw|c5_w) ;; *) [[ "$VARIANT" =~ ^gen_[a-z0-9_]{1,36}$ ]] || { echo "WORLD REFUSED: '$VARIANT' (default, c1_ne, c2_sw, c5_w, gen_<name>)"; exit 3; };; esac
 case "$OFFSET" in 0|90|180|-90) ;; *) echo "OFFSET REFUSED: '$OFFSET' (0, 90, 180, -90)"; exit 3;; esac
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 D=$REPO/tools/demo
