@@ -6,6 +6,7 @@ Each run writes to a new, git-ignored directory (default ``runs/rl/ppo_<UTC>``):
 - ``checkpoints/``: periodic models.
 - ``best_model.zip``: best deterministic evaluation.
 - ``final_model.zip``.
+- ``final_policy_numpy.npz`` / ``best_policy_numpy.npz``: torch-free flight copies (numpy_policy.py).
 - ``monitor/``: per-episode train CSV.
 - ``evaluations.npz``: periodic evaluation.
 - ``eval_summary.json``: final deterministic evaluation of PPO vs the baseline (success, collision,
@@ -37,6 +38,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 import evaluate_policies
+import numpy_policy
 import sar_observation
 import sar_task
 from sar_standin_env import SarStandInEnv
@@ -195,6 +197,17 @@ def main(argv=None):
         env = SarStandInEnv(randomize_start=args.randomize_start, **env_flags)
         summary[name] = evaluate_policies.summarize(
             evaluate_policies.run_episodes(act, reset, env, args.final_eval_episodes, 10_000))
+    # Torch-free flight copies (numpy_policy). An architecture the exporter cannot reproduce exactly is recorded,
+    # never approximated, and does not fail the training run.
+    config["numpy_exports"] = {}
+    for name in ("final_model", "best_model"):
+        if (run_dir / f"{name}.zip").is_file():
+            out = run_dir / f"{name.replace('_model', '')}_policy_numpy.npz"
+            try:
+                numpy_policy.export_policy(run_dir / f"{name}.zip", out)
+                config["numpy_exports"][name] = out.name
+            except ValueError as exc:
+                config["numpy_exports"][name] = f"not exported: {exc}"
     config["finished_utc"] = datetime.now(timezone.utc).isoformat()
     (run_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     (run_dir / "eval_summary.json").write_text(json.dumps(summary, indent=2) + "\n")

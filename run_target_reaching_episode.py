@@ -9,8 +9,10 @@ SITL use (only after the runbook gates pass; see runs/sar_demo_20261018/RUNBOOK_
 Offline dry run against the kinematic stand-in (no ROS, no flight):
     .venv/bin/python run_target_reaching_episode.py --standin --log /tmp/episode.jsonl
 
-With --policy, the checkpoint is loaded (CPU, deterministic actions) and checked against sar_obs_v1 and the
-env's action space before any environment exists; its path and sha256 are logged. Every policy action passes
+With --policy, the policy is loaded and checked against sar_obs_v1 and the env's action space before any
+environment exists; its path and sha256 are logged. A ``.npz`` (numpy_policy.export_policy) is evaluated with
+numpy alone and never imports torch: the flight choice, about 300 MiB lighter. A ``.zip`` SB3 checkpoint is run
+with stable-baselines3 (CPU, deterministic actions). Every policy action passes
 through safety_layer.LidarSafetyFilter, which cannot be disabled here: it only reduces speed or replaces the
 turn, and LiDAR of unknown or stale age (PX4UAVEnv.observation_age(), wall time of the sectors' receipt), a
 malformed policy output, or invalid LiDAR commands a hover. Each step logs the original and applied action and
@@ -309,7 +311,14 @@ def check_policy_spaces(observation_space, action_space):
 
 
 def load_policy(path):
-    """predict(obs) -> action for a stable-baselines3 PPO checkpoint (CPU, deterministic), checked first."""
+    """predict(obs) -> action for a numpy_policy .npz or a stable-baselines3 PPO .zip (CPU, deterministic),
+    checked first."""
+    if Path(path).suffix == ".npz":
+        from numpy_policy import NumpyPolicy
+
+        policy = NumpyPolicy.load(path)
+        check_policy_spaces(policy.observation_space, policy.action_space)
+        return policy.predict
     import torch
     from stable_baselines3 import PPO
 
@@ -406,7 +415,8 @@ def main(argv=None):
                    help="required for SITL: confirms the runbook preflight gates passed and a human is supervising")
     p.add_argument("--max-steps", type=int, default=600)
     p.add_argument("--policy", type=Path,
-                   help="saved PPO checkpoint (.zip), always behind the LiDAR safety filter (default: baseline controller)")
+                   help="policy behind the always-on LiDAR safety filter: numpy_policy .npz (torch-free, for flight) "
+                        "or SB3 PPO .zip (default: baseline controller)")
     args = p.parse_args(argv)
     if not args.standin and not args.i_confirm_supervised_flight:
         p.error("SITL flight requires --i-confirm-supervised-flight after the runbook gates pass")
@@ -420,8 +430,16 @@ def main(argv=None):
                 record(log, "policy_load_failed", path=str(args.policy), error=repr(exc))
                 raise
             f = LidarSafetyFilter()
+            numpy_meta = {}
+            if args.policy.suffix == ".npz":
+                from numpy_policy import NumpyPolicy
+                meta = NumpyPolicy.load(args.policy).meta
+                numpy_meta = {"source": meta["source"], "source_sha256": meta["source_sha256"],
+                              "layer_shapes": meta["layer_shapes"], "activations": meta["activations"]}
             record(log, "policy_loaded", path=str(args.policy.resolve()), sha256=file_sha256(args.policy),
-                   torch_threads=POLICY_TORCH_THREADS, mem_available_mib=mem_available_mib(),
+                   format="numpy" if numpy_meta else "sb3", numpy_export=numpy_meta or None,
+                   torch_loaded="torch" in sys.modules,
+                   torch_threads=None if numpy_meta else POLICY_TORCH_THREADS, mem_available_mib=mem_available_mib(),
                    safety_filter={"stop_clearance_m": f.stop_clearance, "slow_clearance_m": f.slow_clearance,
                                   "emergency_clearance_m": f.emergency_clearance, "max_age_s": f.max_age_s})
         if args.standin:
