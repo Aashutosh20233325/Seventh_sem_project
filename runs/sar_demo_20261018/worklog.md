@@ -593,3 +593,22 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Runtime guard during the flight:** never aborted. Its 6 non-OK samples were warm-up (`px4_clock_insufficient_history`) before its preflight; minimum speed 0.478×, minimum MemAvailable 1569 MiB.
 - **Stop:** attempt 1 independently confirmed fresh landed, at-rest and disarmed telemetry, then was incomplete (PX4/gz outlasted the bounded stop, no SIGKILL); attempts 2–5 refused (no telemetry); the stack exited on its own ("stack stopped"). No `stopped_at_utc`. QGroundControl left running.
 - **Outcome:** the first complete live episode in this setup with the baseline controller. No PPO. Readiness depends on the Windows host having free memory, and WSL MemAvailable drift remains the tightest margin for longer sessions.
+
+## First supervised live PPO flight (E1R 300k seed 2, numpy, safety filter): SUCCESS — 2026-10-25 10:05–10:12 UTC
+
+- **Approval:** the user explicitly asked for a live PPO demo using the numpy policy on 2026-10-25. Code `1fac16b` (clean tree): runner `--policy` path (`18ebe00`) and numpy export (`1fac16b`). Split rendering, QGroundControl running, Chrome closed (host baseline: median 0 pages/s, page file 4.6%, 1.6 GB available).
+- **Policy:** `runs/rl/exp20261022_randtarget300k/E1R_s2/final_policy_numpy.npz` (sha256 `fbcacf93…0511`, made read-only), exported from `final_model.zip` (sha256 `06a0b636…278a`). Parity with SB3 ≤ 6e-7.
+  - **Why seed 2:** 50/50 stand-in successes on the live world through the exact runner path (numpy and filter), median 51 steps. Seeds 1 and 3 were also 50/50 but took about 146–148 steps. Seed 2 with the filter also scored best in the safety-filter and occlusion evaluations.
+- **Run:** `restart_20261025_ppo1`. Orchestration: `/home/hp/uav_ros_experiments/ppo_flight_20261025/run_ppo_flight.sh`, a copy of the flown baseline script. Differences: `--policy` with that file, and its sha256 checked before anything starts. Tests: `test_flight_block.py` 15/15; repo suite 441 passed; an offline dry run of the same command gave `success` at about 66 MiB peak.
+- **Readiness:** gates PASS; **windows 6/6** at 0.453–0.518×. Pre-flight state: disarmed, landed, preflight ok, `/fmu/in` 0, 1692 MiB.
+- **Episode (`logs/episode.jsonl`):**
+  - Policy loaded in numpy format, **torch not loaded**, 1729 MiB available.
+  - Guard preflight OK at 0.498×, 1638 MiB.
+  - `reset()` took 19.9 s; the start was 4.31 m from the target.
+  - The target was first detected at step 2 and seen in 31 of 38 steps.
+  - Step 37: **`success`**, no collision, minimum LiDAR 2.18 m, then the return to start (0.04, −0.01).
+  - 38 steps in 22.0 s wall; `close()` (land, disarm confirmed) took 12.4 s.
+- **Safety filter:** intervened on 10 of 38 steps, all `slow` (speed caps); mean speed 0.92 commanded vs 0.82 applied. LiDAR age at decision: median 0.054 s, maximum 0.181 s (limit 0.5 s).
+- **Runtime guard:** never aborted. Its non-OK samples were warm-up only (5 `px4_clock_insufficient_history`, 1 `px4_clock_missing`) before its preflight; minimum speed 0.483×, minimum MemAvailable 1519 MiB.
+- **Stop:** attempt 1 confirmed fresh landed, at-rest and disarmed telemetry, then was incomplete (PX4/gz, no SIGKILL); attempts 2–5 refused (no telemetry); "stack stopped". QGroundControl left running.
+- **Outcome:** first live PPO episode: 38 steps against the baseline's 64 in the same world. One episode at one fixed start and target is a demonstration, not a reliability measure; the policy has been validated statistically only in the stand-in.

@@ -2,9 +2,10 @@
 
 Status (2026-10-25): **one supervised baseline flight succeeded** (`restart_20261025_baseline1`, code `5df1273`, split
 rendering): 6/6 stability windows at 0.497–0.512×, target reached in 64 steps, landed and disarmed. B1/B2/B3 are
-committed (`837a876`). Readiness depends on free memory on the Windows host (see "Host memory" below). PPO has not
-flown: the runner's `--policy` path (behind the LiDAR safety filter) is tested offline only. No flight is authorized
-by this document. Every
+committed (`837a876`). Readiness depends on free memory on the Windows host (see "Host memory" below). **One
+supervised PPO flight succeeded** (`restart_20261025_ppo1`, code `1fac16b`): E1R 300k seed 2 as a torch-free numpy
+export behind the LiDAR safety filter, target reached in 38 steps, landed and disarmed. That is one episode, not a
+reliability measure. No flight is authorized by this document. Every
 step that could arm or take off is marked **DO NOT RUN WITHOUT EXPLICIT APPROVAL**. Detailed procedure and history:
 `runs/sar_demo_20261018/RUNBOOK_ISOLATED.md` and `runs/sar_demo_20261018/worklog.md`.
 
@@ -21,7 +22,7 @@ The episode runner (`run_target_reaching_episode.py`) drives `PX4UAVEnv` with th
 4. Approach with altitude hold until the target is within 0.75 m (horizontal).
 5. Return to start, NAV_LAND, auto-disarm.
 
-With `--policy <checkpoint.zip>` the runner drives a saved PPO policy instead (offline-tested, **not flown**):
+With `--policy <policy.npz | checkpoint.zip>` the runner drives a saved PPO policy instead (flown once as `.npz`, 2026-10-25):
 - **Loading:** CPU inference with deterministic actions and 1 torch thread. The checkpoint is checked against `sar_obs_v1` and the action space before any env exists, and its sha256 is logged.
 - **Safety filter:** every action passes through `safety_layer.LidarSafetyFilter` (stop at 1.2 m, slow below 3.0 m, emergency below 0.5 m). There is no option to disable it.
 - **Hover cases:** unknown or stale LiDAR (> 0.5 s wall since the returned sectors were received, from `PX4UAVEnv.observation_age()`), invalid LiDAR, or a malformed policy output all command a hover.
@@ -153,9 +154,10 @@ ROS_DOMAIN_ID=43 .venv/bin/python -u run_target_reaching_episode.py \
 ```
 
 The command refuses to run without `--i-confirm-supervised-flight`, refuses to overwrite an existing log, and never retries.
-A PPO episode adds `--policy runs/rl/exp20261022_randtarget300k/E1R_s<N>/final_model.zip` (separate explicit approval
-required; not flown yet). Memory: the runner peaks at about 90 MiB with the baseline and about 360–410 MiB with
-torch and stable-baselines3. The policy loads before the guard's 1.2 GiB start check, so too little memory gives
+A PPO episode adds `--policy runs/rl/exp20261022_randtarget300k/E1R_s2/final_policy_numpy.npz` (explicit approval
+required each time; flown orchestration `/home/hp/uav_ros_experiments/ppo_flight_20261025/run_ppo_flight.sh`).
+Memory: the runner peaks at about 65–90 MiB with the baseline or a numpy `.npz` policy (`numpy_policy.py`, never
+imports torch), and about 360–410 MiB with an SB3 `.zip` (torch and stable-baselines3). The policy loads before the guard's 1.2 GiB start check, so too little memory gives
 `guard_refuse` before arming.
 The flown orchestration (gates, windows, observer stopped by exact PID, fail-closed pre-flight state check, one runner
 call, gated stop) is `/home/hp/uav_ros_experiments/baseline_flight_20261025/run_flight.sh`.
