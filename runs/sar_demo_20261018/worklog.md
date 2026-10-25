@@ -544,3 +544,52 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
 - **Resources and state:** MemAvailable ≥ 1716 MiB. Swap grew 26.6 → 82.9 MiB while the observer ran (56 MiB, below its 64 MiB abort limit) and stayed at 84 MiB after the stop; gz server RSS 526 → 882 MiB. `/fmu/in` publishers 0 every second; vehicle disarmed and landed throughout.
 - **Stop:** same pattern; the server exited 46–56 s after the stop began. No SIGKILL; no `stopped_at_utc`.
 - **Outcome and limits:** passive only; no arming, take-off, `/fmu/in` publishing, or episode. This is evidence about discovery and the guard, **not proof of flight readiness**. Open observations, not demonstrated failures: swap growth, the 35–61 s gz-server exit since clockcheck1 (split2 stopped normally), and gz server memory growth (about 50 MiB/min). The live stall reason remains untriggered (offline coverage only). The B1 step clock, B2 fly-to timeout and B3 in-episode behaviour have not flown.
+
+## Diagnostics between guardcheck3 and the host-memory runs (summary) — 2026-10-24
+
+- **Code:** B1/B2/B3 committed as `837a876`; `close()` ground-confirmation fix as `5df1273`. Orchestration and raw data for each run are in `/home/hp/uav_ros_experiments/<dir>/` (named below).
+- **`restart_20261024_action30_1`** (`action_test_20261024/`): one 30-step SITL attempt → `guard_refuse` at speed 0.3496× (floor 0.35×). No take-off.
+- **`restart_20261024_runnerload1`** (`runner_load_20261024/`): passive; runner overhead not established.
+- **`restart_20261024_earlystart1`** (`early_start_20261024/`): passive; inconclusive, a dip at 410–416 s.
+- **`restart_20261024_perf1`** (`perf_measure_20261024/`): readiness FAIL on a gap; the GPU was about 37% busy, not saturated.
+- **`restart_20261024_guiab1`** (`runner_gui_ab_20261024/`): readiness FAIL (perception gap 2.05 s), so the GUI on/off comparison was not run.
+
+## Passive host-memory diagnostic 1: readiness FAIL 0/6 (host paging) — 2026-10-24 21:52–21:58 UTC
+
+- **Run:** `restart_20261024_hostmem1`, code `5df1273`, split rendering. Orchestration: `/home/hp/uav_ros_experiments/hostmem_20261024/run_hostmem.sh` (sha256 `0164e6cb…6e53e`): the established gates and windows, plus a 1 s Windows typeperf sampler (Available MBytes, Pages/sec, Page Faults/sec, Paging File % Usage, vmmemWSL and Memory Compression working sets). Analysis: `analyze_hostmem.py` → `hostmem_analysis.json`; 9 offline tests passed. Passive: no runner, no `/fmu/in` publisher, no arming.
+- **Readiness:** gates PASS; **windows 0/6** at 0.252–0.310×. Gaps up to 2.71 s (status), 4.69 s (land) and 2.72 s (perception).
+- **Windows host:** 7.86 GB RAM, with WSL capped at 5 GB. Already 14,699 pages/s before Gazebo started. During the run: Pages/sec median 1,725 and 90th percentile 17,065; the page file grew 16.9 → 23.6%; Memory Compression used up to 60–88% of a CPU; vmmemWSL working set 0.93–1.42 GB; GPU about 808 MHz / 6.9 W (starved of work).
+- **Effects:** the worst speed (0.243–0.257×) and perception gaps of 2.7 s fell in the heaviest paging bursts. PX4 logged `Accel #0 fail: TIMEOUT!`, and preflight was false for about 9 s (at 199–207 s).
+- **Resources and state:** WSL MemAvailable ≥ 1995 MiB, swap 13 MiB; vehicle disarmed and landed throughout.
+- **Stop:** attempt 1 confirmed landed and disarmed, then was incomplete (gz server, no SIGKILL); attempts 2–5 refused; the server exited on its own.
+
+## Passive host-memory diagnostic 2 (Chrome closed): readiness PASS 6/6, 240 s observation clean — 2026-10-25 09:05–09:16 UTC
+
+- **Run:** `restart_20261025_hostmem2`, the same script (sha256 unchanged) and code. The only deliberate change: the user closed Chrome and its tabs on Windows beforehand (30 s baseline: about 1.5 pages/s, page file 5.5%, 1.9 GB available). Analysis: `hostmem2_analysis.json`.
+- **Readiness:** gates PASS; **windows 6/6** at 0.435–0.507×; the 240 s observation had 0 guard failures and ran at 0.489× (60 s chunks 0.47–0.50×). Worst gaps 1.58 s (status), 2.74 s (land), 1.05 s (perception). No PX4 sensor timeouts.
+- **Windows host:** Pages/sec median 29 and 90th percentile 2,193; page file flat at about 5.3%; GPU about 1,580 MHz / 21 W. A 15 s burst at 09:13 (up to 18.7k pages/s, Defender at 65–97% of a CPU) dipped speed only to 0.43–0.49×. The lowest speed, 0.428× at 09:09:31, had no paging but a GPU at about 900 MHz (unexplained).
+- **WSL memory drift:** MemAvailable fell about 60–70 MiB/min (2,054 → 1,378 MiB), mainly because the gz server grew 577 → 1,125 MiB; it recovered after the stop. The runtime guard's start threshold is 1.2 GiB.
+- **Conclusion:** host memory pressure on Windows is the strongest explanation for the slow runs (one run in each condition, so not a controlled proof).
+- **Stop:** same pattern as hostmem1; vehicle disarmed and landed throughout.
+
+## First supervised live flight (baseline controller): SUCCESS — 2026-10-25 09:33–09:40 UTC
+
+- **Approval:** the user explicitly approved one supervised baseline flight on 2026-10-25. Code `5df1273` (clean tree), split rendering, QGroundControl running (pid 42280), Chrome closed (host baseline: median 0 pages/s, page file 4.7%).
+- **Run:** `restart_20261025_baseline1`. Orchestration: `/home/hp/uav_ros_experiments/baseline_flight_20261025/run_flight.sh` (sha256 `da0c3ee6…b805`), a copy of `run_hostmem.sh`. After 6/6 windows it replaces the 240 s observation with:
+  1. stop the passive observer by exact PID;
+  2. run the fail-closed `preflight_state.py` check on its last state (no abort record, fresh, disarmed, no failsafe, preflight ok, landed, `/fmu/in` 0);
+  3. run `run_target_reaching_episode.py --i-confirm-supervised-flight` once, with no retry.
+
+  Tests: `test_flight_block.py` 14/14; full repo suite 405 passed; an offline stand-in episode returned `success`.
+- **Readiness:** gates PASS (topics on attempt 2, world target, strict `/fmu/in`, render-check); **windows 6/6** at 0.497–0.512×. Pre-flight state: disarmed, landed, preflight ok, `/fmu/in` 0, MemAvailable 1679 MiB.
+- **Episode (`logs/episode.jsonl`):**
+  - Guard preflight OK at 0.493×, 1653 MiB.
+  - `reset()` (arm, take-off, fly to start) took 18.8 s; the vehicle held 1.62 m at the start, 4.34 m from the target.
+  - The target was first detected at step 2 and seen in 51 of 64 steps; the vehicle reached 0.76 m at step 62.
+  - Step 63: **`success`**, no collision, minimum LiDAR 2.01 m, then the return to start (0.04, −0.02) inside that step.
+  - 64 steps in 29.2 s wall.
+  - `close()` (NAV_LAND, landed-and-disarmed confirmation) took 11.9 s.
+  - Runner exit 0, `EPISODE RESULT: success`.
+- **Runtime guard during the flight:** never aborted. Its 6 non-OK samples were warm-up (`px4_clock_insufficient_history`) before its preflight; minimum speed 0.478×, minimum MemAvailable 1569 MiB.
+- **Stop:** attempt 1 independently confirmed fresh landed, at-rest and disarmed telemetry, then was incomplete (PX4/gz outlasted the bounded stop, no SIGKILL); attempts 2–5 refused (no telemetry); the stack exited on its own ("stack stopped"). No `stopped_at_utc`. QGroundControl left running.
+- **Outcome:** the first complete live episode in this setup with the baseline controller. No PPO. Readiness depends on the Windows host having free memory, and WSL MemAvailable drift remains the tightest margin for longer sessions.

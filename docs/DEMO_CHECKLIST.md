@@ -1,8 +1,10 @@
 # Visible Gazebo/PX4 target-reaching demo — checklist
 
-Status (2026-10-24): **no-flight readiness passes with split rendering** (`restart_20261024_guardcheck3`: all gates, 6/6
-stability windows, a 300 s passive runtime-guard run). The B1/B2/B3 clock and runtime-guard changes are **uncommitted
-and have not flown**. No flight is authorized by this document. Every
+Status (2026-10-25): **one supervised baseline flight succeeded** (`restart_20261025_baseline1`, code `5df1273`, split
+rendering): 6/6 stability windows at 0.497–0.512×, target reached in 64 steps, landed and disarmed. B1/B2/B3 are
+committed (`837a876`). Readiness depends on free memory on the Windows host (see "Host memory" below). PPO has not
+flown: the runner's `--policy` path (behind the LiDAR safety filter) is tested offline only. No flight is authorized
+by this document. Every
 step that could arm or take off is marked **DO NOT RUN WITHOUT EXPLICIT APPROVAL**. Detailed procedure and history:
 `runs/sar_demo_20261018/RUNBOOK_ISOLATED.md` and `runs/sar_demo_20261018/worklog.md`.
 
@@ -19,7 +21,13 @@ The episode runner (`run_target_reaching_episode.py`) drives `PX4UAVEnv` with th
 4. Approach with altitude hold until the target is within 0.75 m (horizontal).
 5. Return to start, NAV_LAND, auto-disarm.
 
-The runner has **no PPO path**. Flying a PPO checkpoint live would be a new, separately reviewed change. The E1R 300k checkpoints match the interface (`test_policy_interface_compat.py`), but the LiDAR safety filter is not wired into the live system.
+With `--policy <checkpoint.zip>` the runner drives a saved PPO policy instead (offline-tested, **not flown**):
+- **Loading:** CPU inference with deterministic actions and 1 torch thread. The checkpoint is checked against `sar_obs_v1` and the action space before any env exists, and its sha256 is logged.
+- **Safety filter:** every action passes through `safety_layer.LidarSafetyFilter` (stop at 1.2 m, slow below 3.0 m, emergency below 0.5 m). There is no option to disable it.
+- **Hover cases:** unknown or stale LiDAR (> 0.5 s wall since the returned sectors were received, from `PX4UAVEnv.observation_age()`), invalid LiDAR, or a malformed policy output all command a hover.
+- **Logging:** each step logs the original and applied action and the filter's reason.
+
+The E1R 300k checkpoints are validated only in the stand-in: there they succeed with the filter, but some time out behind interior walls.
 
 ## Former blocker (measured 2026-10-22, run `restart_20261022_preflight1`; superseded, kept as a record)
 
@@ -27,6 +35,18 @@ The runner has **no PPO path**. Flying a PPO checkpoint live would be a new, sep
 - **Memory:** with the gz GUI on D3D12, MemAvailable falls about 137 MiB/min (1517 → 1036 MiB in 3.5 min). The server grows about 50 MiB/min and the GUI about 80 MiB/min. After start-up, gates, and six windows (~4.5 min), MemAvailable is below the runtime guard's 1.2 GiB start threshold, so `guard_refuse` would trigger even with passing speed.
 - **Not caused by:** stale telemetry, the target position, LiDAR, the observation/action interface, or the guard (its live read-only validation matched an independent computation).
 - **Since then:** WSL memory was raised to 5 GB and split rendering was adopted. In that configuration (its log shows 4915 MiB total, so it ran after the WSL change) `restart_20261023_split2` still failed 2/6 windows (camera 0.316× and 0.341×); `restart_20261023_clockcheck1`, `restart_20261024_guardcheck2` and `restart_20261024_guardcheck3` then passed 6/6 each (camera 0.374–0.411×), with MemAvailable ≥ 1664 MiB. So 3 of 4 runs passed the speed gate, and the margin is small: the lowest passing window was 0.374× (7% above 0.35×) and the lowest 25 s guard speed 0.365× (4%).
+
+## Host memory (measured 2026-10-24/25)
+
+The Windows host has 7.86 GB RAM and WSL is capped at 5 GB. With browsers open, Windows pages heavily and the stack
+drops to 0.25–0.31× (`restart_20261024_hostmem1`, 0/6 windows). With Chrome closed it ran at about 0.50×
+(`restart_20261025_hostmem2` 6/6, `restart_20261025_baseline1` 6/6 and flown). Before a live run:
+- Take a 30 s host baseline (`typeperf "\Memory\Pages/sec" "\Memory\Available MBytes" "\Paging File(_Total)\% Usage" -si 1 -sc 30`).
+- If paging is high, ask the operator to close memory-heavy applications. Never close them automatically, and do not raise
+  the WSL limit (that worsens host paging).
+
+Inside WSL, MemAvailable falls about 60–70 MiB/min while Gazebo runs (the gz server grows), so start the episode soon
+after the windows.
 
 ## Diagnosing rendering overhead without system changes
 
@@ -133,16 +153,22 @@ ROS_DOMAIN_ID=43 .venv/bin/python -u run_target_reaching_episode.py \
 ```
 
 The command refuses to run without `--i-confirm-supervised-flight`, refuses to overwrite an existing log, and never retries.
+A PPO episode adds `--policy runs/rl/exp20261022_randtarget300k/E1R_s<N>/final_model.zip` (separate explicit approval
+required; not flown yet). Memory: the runner peaks at about 90 MiB with the baseline and about 360–410 MiB with
+torch and stable-baselines3. The policy loads before the guard's 1.2 GiB start check, so too little memory gives
+`guard_refuse` before arming.
+The flown orchestration (gates, windows, observer stopped by exact PID, fail-closed pre-flight state check, one runner
+call, gated stop) is `/home/hp/uav_ros_experiments/baseline_flight_20261025/run_flight.sh`.
 
 ## Evidence to review before authorizing a flight
 
 1. A fresh `verify_isolated_topics` PASS, `verify_world_target` PASS, the strict `/fmu/in` gate PASS (0 publishers and the PX4-side reader identified on all three topics), and the renderer check, from the same run.
 2. All six stability-window results: per-clock speed, gaps, and vehicle state, each ≥ 0.35×.
 3. MemAvailable and swap at the end of the windows, with the trend since start (it must still be ≥ 1.2 GiB when the runner would start).
-4. The commit hash and a clean tree, with the full offline suite passing at that commit. (Not yet met: the B1/B2/B3 changes are uncommitted.)
+4. The commit hash and a clean tree, with the full offline suite passing at that commit.
 5. QGroundControl connected (`gcs_connection_lost = false`).
 
-## Recovery, landing, and aborts (landing and abort paths unchanged; guard clock inputs changed by B3, uncommitted)
+## Recovery, landing, and aborts (guard clock inputs from B3, `837a876`; flown once, 2026-10-25)
 
 - **Runtime guard** (`run_target_reaching_episode.py`):
   - **Before take-off:** refuses (`guard_refuse`, no arming) unless MemAvailable ≥ 1.2 GiB and a full 25 s window has speed ≥ 0.35×.
