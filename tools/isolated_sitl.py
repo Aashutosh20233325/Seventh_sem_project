@@ -63,6 +63,7 @@ CAMERA_RGB_TOPIC = "/uav/camera/rgb/image"
 CAMERA_RGB_INFO_TOPIC = "/uav/camera/rgb/camera_info"
 CAMERA_DEPTH_TOPIC = "/uav/camera/depth/image"
 CAMERA_DEPTH_INFO_TOPIC = "/uav/camera/depth/camera_info"
+AGL_RANGE_TOPIC = "/uav/agl_range"   # downward single-beam range (terrain following), camera profile only
 # Split rendering (opt-in): PX4 starts only the gz server (HEADLESS=1; px4-rc.gzsim gates nothing else on it),
 # which keeps gz_env.sh's d3d12/NVIDIA selection; this launcher starts the GUI itself, as a recorded owned process,
 # from a separate env file that pins Mesa llvmpipe. PX4's one-off /gui/track follow message is published
@@ -95,6 +96,7 @@ class Profile:
         model_prefix = f"/world/{world}/model/{self.model_instance}"
         self.lidar_topic = f"{model_prefix}/link/link/sensor/lidar_2d_v2/scan"
         self.camera_prefix = f"{model_prefix}/link/camera_link/sensor"
+        self.agl_topic = f"{model_prefix}/link/agl_rangefinder_link/sensor/agl_rangefinder/scan"
 
     def bridge_arguments(self) -> list[str]:
         args = [f"{self.lidar_topic}@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan"]
@@ -106,11 +108,13 @@ class Profile:
             f"{rgb}/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
             "/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image",
             "/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+            f"{self.agl_topic}@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
             "--ros-args",
             "-r", f"{rgb}/image:={CAMERA_RGB_TOPIC}",
             "-r", f"{rgb}/camera_info:={CAMERA_RGB_INFO_TOPIC}",
             "-r", f"/depth_camera:={CAMERA_DEPTH_TOPIC}",
             "-r", f"/camera_info:={CAMERA_DEPTH_INFO_TOPIC}",
+            "-r", f"{self.agl_topic}:={AGL_RANGE_TOPIC}",
         ]
         return args
 

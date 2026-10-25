@@ -26,5 +26,32 @@
       <child>camera_link</child>
       <pose relative_to="base_link">0 0 0 0 0 0</pose>
     </joint>
+    <!-- Downward single-beam range for terrain following (3D step 2, option A). Same geometry as PX4's
+         x500_lidar_down sensor, but deliberately NOT named lidar_sensor_link/lidar: PX4's GZBridge subscribes to
+         that name and would fuse it into EKF2 height; this one reaches only the project's ROS bridge. -->
+    <link name="agl_rangefinder_link">
+      <pose relative_to="base_link">0 0 -0.05 0 1.5707963 0</pose>
+      <inertial>
+        <mass>0.001</mass>
+        <inertia><ixx>0.00001</ixx><iyy>0.00001</iyy><izz>0.00001</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+      </inertial>
+      <sensor name="agl_rangefinder" type="gpu_lidar">
+        <gz_frame_id>agl_rangefinder_link</gz_frame_id>
+        <update_rate>20</update_rate>
+        <ray>
+          <scan>
+            <horizontal><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution><min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.1</min><max>100.0</max><resolution>0.01</resolution></range>
+        </ray>
+        <always_on>1</always_on>
+        <visualize>false</visualize>
+      </sensor>
+    </link>
+    <joint name="AglRangefinderJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>agl_rangefinder_link</child>
+    </joint>
   </model>
 </sdf>

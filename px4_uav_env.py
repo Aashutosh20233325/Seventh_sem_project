@@ -19,7 +19,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 
-from sensor_msgs.msg import CameraInfo
+from sensor_msgs.msg import CameraInfo, LaserScan
 from std_msgs.msg import Float32MultiArray, Float64MultiArray
 
 from px4_msgs.msg import (
@@ -42,6 +42,9 @@ import target_perception
 
 VEHICLE_COMMAND_ACK_TOPIC = "/fmu/out/vehicle_command_ack_v1"
 LIDAR_SECTORS_TOPIC = "/uav/lidar_sectors"
+# Downward single-beam range (terrain following, 3D step 2, option A): bridged from Gazebo by the launcher under a
+# name PX4's gz_bridge does not subscribe to, so PX4's height estimation is unchanged.
+AGL_RANGE_TOPIC = os.environ.get("SAR_AGL_RANGE_TOPIC", "/uav/agl_range")
 TARGET_PERCEPTION_TOPIC = "/uav/target_perception"
 # RGB camera_info header stamps are Gazebo simulation time; they time action steps.
 CAMERA_RGB_INFO_TOPIC = os.environ.get("SAR_CAMERA_RGB_INFO_TOPIC", "/uav/camera/rgb/camera_info")
@@ -181,6 +184,13 @@ class PX4ControllerNode(Node):
             qos,
         )
 
+        self.agl_sub = self.create_subscription(
+            LaserScan,
+            AGL_RANGE_TOPIC,
+            self.agl_callback,
+            qos_profile_sensor_data,
+        )
+
         # --------------------------------------------------
         # State
         # --------------------------------------------------
@@ -213,6 +223,13 @@ class PX4ControllerNode(Node):
         self.camera_clock_samples = 0
         self.camera_clock_invalid = None   # reason string once invalidated; sticky until reset
         self.hold_z = self.TAKEOFF_TARGET_Z
+        # Terrain following (off unless the env enables it): hold TAKEOFF_TARGET_Z relative to the ground height
+        # recorded under the start point, from the downward range. See terrain_hold_z().
+        self.terrain_following = False
+        self.agl_range = None             # m, latest valid downward range (None: no return)
+        self.agl_received_at = None       # monotonic receipt time of the latest downward scan
+        self.terrain_ref_ground_z = None  # NED z of the ground under the start point
+        self._terrain_last_t = None
         self.goal = None              # (x, y, z, yaw) NED for the REPOSITION phase
 
         self.arming_state = 1
@@ -476,6 +493,40 @@ class PX4ControllerNode(Node):
         else:
             self.landing_complete = False
 
+    def agl_callback(self, msg):
+        ranges = [r for r in msg.ranges if math.isfinite(r) and msg.range_min <= r <= msg.range_max]
+        with self.condition:
+            self.agl_range = min(ranges) if ranges else None
+            self.agl_received_at = time.monotonic()
+
+    AGL_MAX_AGE = 0.5          # s wall: an older downward range is not used
+    TERRAIN_MAX_DEVIATION = 1.0  # m: the height target stays within this of TAKEOFF_TARGET_Z
+    TERRAIN_MAX_RATE = 0.5     # m/s: largest change of the height target
+
+    def ground_z(self, now):
+        """NED z of the ground under the vehicle from a fresh downward range, else None (caller holds condition)."""
+        if (self.agl_range is None or self.agl_received_at is None
+                or now - self.agl_received_at > self.AGL_MAX_AGE or self.z is None):
+            return None
+        return self.z + self.agl_range * math.cos(self.roll) * math.cos(self.pitch)
+
+    def terrain_hold_z(self, now):
+        """Height target that keeps TAKEOFF_TARGET_Z above the current ground, relative to the reference ground.
+
+        On flat ground the target is exactly TAKEOFF_TARGET_Z. Clamped to +-TERRAIN_MAX_DEVIATION and rate limited to
+        TERRAIN_MAX_RATE; without a fresh range or a reference the target is left unchanged (caller holds condition).
+        """
+        ground = self.ground_z(now)
+        dt = 0.0 if self._terrain_last_t is None else min(max(now - self._terrain_last_t, 0.0), 0.2)
+        self._terrain_last_t = now
+        if ground is None or self.terrain_ref_ground_z is None:
+            return self.hold_z
+        desired = self.TAKEOFF_TARGET_Z + (ground - self.terrain_ref_ground_z)
+        desired = min(max(desired, self.TAKEOFF_TARGET_Z - self.TERRAIN_MAX_DEVIATION),
+                      self.TAKEOFF_TARGET_Z + self.TERRAIN_MAX_DEVIATION)
+        step = self.TERRAIN_MAX_RATE * dt
+        return min(max(desired, self.hold_z - step), self.hold_z + step)
+
     def attitude_callback(self, msg):
 
         # PX4 quaternion:
@@ -710,6 +761,8 @@ class PX4ControllerNode(Node):
             elif self.phase == "VELOCITY":
                 # The position flag enables PX4's per-axis position/velocity
                 # control: NaN xy position uses the velocity setpoint.
+                if getattr(self, "terrain_following", False):
+                    self.hold_z = self.terrain_hold_z(time.monotonic())
                 self.publish_offboard_mode(position_mode=True)
                 self.publish_velocity_setpoint(hold_z=self.hold_z)
             elif self.phase == "LAND":
@@ -868,9 +921,10 @@ class PX4UAVEnv(gym.Env):
     REPOSITION_WALL_TIMEOUT = 120.0     # s wall ceiling
     STEP_DURATION = 0.1                 # s of simulation time per action
 
-    def __init__(self):
+    def __init__(self, terrain_following=False):
 
         super().__init__()
+        self.terrain_following = bool(terrain_following)
 
         # --------------------------------------------------
         # Same action interface as old environment
@@ -930,6 +984,7 @@ class PX4UAVEnv(gym.Env):
             rclpy.init()
 
         self.node = PX4ControllerNode(self)
+        self.node.terrain_following = self.terrain_following
 
         self.spin_thread = threading.Thread(
             target=self._spin,
@@ -968,7 +1023,7 @@ class PX4UAVEnv(gym.Env):
             if clock_problem is not None:
                 raise ValueError(f"Observation needs a valid simulation clock: {clock_problem}.")
             ego = sar_observation.EgoState(
-                x=node.x, y=node.y, z=node.z, vx=node.vx, vy=node.vy,
+                x=node.x, y=node.y, z=self._observation_z(node, now), vx=node.vx, vy=node.vy,
                 heading=node.heading, yaw_rate=node.yaw_rate,
             )
             perception = node.latest_perception
@@ -1433,10 +1488,32 @@ class PX4UAVEnv(gym.Env):
         # Repeatable episode start: fly (speed-limited) to the start pose.
         self._fly_to_start()
 
+        self._enter_velocity_phase()
+
+    def _enter_velocity_phase(self):
+        """Start the policy phase at TAKEOFF_TARGET_Z. With terrain following, first record the ground under the
+        (flat) start point as the reference; without a fresh downward range it raises before the phase starts, so
+        the caller's safe state lands."""
         with self.node.condition:
             self.node.hold_z = self.node.TAKEOFF_TARGET_Z
+            if getattr(self, "terrain_following", False):
+                ground = self.node.ground_z(time.monotonic())
+                if ground is None:
+                    raise RuntimeError("Terrain following needs a fresh downward range at the start point.")
+                self.node.terrain_ref_ground_z = ground
+                self.node._terrain_last_t = None
             self.node.phase = "VELOCITY"
             self.node.condition.notify_all()
+
+    @staticmethod
+    def _observation_z(node, now):
+        """z for the policy's height input: with terrain following, relative to the current ground (so it equals
+        -height above ground as on the start pad); otherwise the EKF z. Caller holds the condition."""
+        if getattr(node, "terrain_following", False) and getattr(node, "terrain_ref_ground_z", None) is not None:
+            ground = node.ground_z(now)
+            if ground is not None:
+                return node.z - (ground - node.terrain_ref_ground_z)
+        return node.z
 
     def _fly_to_start(self):
         yaw = getattr(self, "_start_yaw", self.START_YAW)      # set by reset(options); nominal otherwise

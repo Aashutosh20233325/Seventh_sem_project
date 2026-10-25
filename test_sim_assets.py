@@ -38,4 +38,13 @@ def test_uav_model_keeps_stock_lidar_mount_and_adds_pitched_oakd():
     assert math.isclose(cam[4], math.radians(30.0), abs_tol=1e-9)
     assert cam[3] == cam[5] == 0.0
     joints = {j.get("name"): (j.findtext("parent"), j.findtext("child")) for j in model.findall("joint")}
-    assert joints == {"LidarJoint": ("base_link", "link"), "CameraJoint": ("base_link", "camera_link")}
+    assert joints == {"LidarJoint": ("base_link", "link"), "CameraJoint": ("base_link", "camera_link"),
+                      "AglRangefinderJoint": ("base_link", "agl_rangefinder_link")}
+    # Downward range for terrain following: pointing down, and deliberately not PX4's lidar_sensor_link/lidar name
+    # (PX4 GZBridge would fuse that into EKF2 height).
+    link = next(l for l in model.findall("link") if l.get("name") == "agl_rangefinder_link")
+    pose = _pose(link.findtext("pose"))
+    assert pose[:3] == [0, 0, -0.05] and math.isclose(pose[4], math.pi / 2, abs_tol=1e-6)
+    sensor = link.find("sensor")
+    assert (sensor.get("name"), sensor.get("type")) == ("agl_rangefinder", "gpu_lidar")
+    assert all(l.get("name") != "lidar_sensor_link" for l in model.findall("link"))

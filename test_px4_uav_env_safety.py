@@ -49,6 +49,7 @@ def load_environment(monkeypatch):
 
     sensor_msgs = types.ModuleType("sensor_msgs.msg")
     sensor_msgs.CameraInfo = type("CameraInfo", (), {})
+    sensor_msgs.LaserScan = type("LaserScan", (), {})
 
     std_msgs = types.ModuleType("std_msgs.msg")
     std_msgs.Float32MultiArray = type("Float32MultiArray", (), {})

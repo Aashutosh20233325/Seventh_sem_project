@@ -113,6 +113,7 @@ def test_memory_abort_flag_never_starts_the_runner(tmp_path):
 # ---------- arguments, policy, safety properties ----------
 
 @pytest.mark.parametrize("args", [[], ["Demo1", "ppo"], ["d1", "fly"], ["d1", "ppo", "c3_x"], ["d1", "ppo", "default", "45"],
+                                  ["d1", "ppo", "default", "0", "agl"], ["d1", "ppo", "gen_Bad"], ["d1", "ppo", "gen_x;y"],
                                   ["d1; rm -rf /", "ppo"], ["d1", "ppo", "../c2_sw"], ["d1", "PPO"]])
 def test_arguments_are_validated_before_anything_starts(args):
     t = SCRIPT.read_text()
@@ -121,13 +122,14 @@ def test_arguments_are_validated_before_anything_starts(args):
     assert p.returncode == 3 and "REACHED" not in p.stdout and "REFUSED" in p.stdout
 
 
-@pytest.mark.parametrize("mode, offset, expect", [("ppo", "0", "--policy p.npz"), ("ppo", "180", "--policy p.npz --start-yaw-offset-deg 180"),
-                                                  ("baseline", "0", ""), ("baseline", "-90", " --start-yaw-offset-deg -90"),
-                                                  ("passive", "0", "")])
-def test_runner_args_per_mode_and_offset(mode, offset, expect):
+@pytest.mark.parametrize("mode, offset, height, expect", [
+    ("ppo", "0", "flat", "--policy p.npz"), ("ppo", "180", "flat", "--policy p.npz --start-yaw-offset-deg 180"),
+    ("baseline", "0", "flat", ""), ("baseline", "-90", "flat", " --start-yaw-offset-deg -90"), ("passive", "0", "flat", ""),
+    ("ppo", "0", "tf", "--policy p.npz --terrain-following"), ("baseline", "90", "tf", " --start-yaw-offset-deg 90 --terrain-following")])
+def test_runner_args_per_mode_offset_and_height(mode, offset, height, expect):
     t = SCRIPT.read_text()
     block = t[t.index('RUNNER_ARGS=""'):t.index('echo "demo:')]
-    p = subprocess.run(["bash", "-c", f"MODE={mode}; OFFSET={offset}; POLICY=p.npz\n{block}echo \"[$RUNNER_ARGS]\""],
+    p = subprocess.run(["bash", "-c", f"MODE={mode}; OFFSET={offset}; HEIGHT={height}; POLICY=p.npz\n{block}echo \"[$RUNNER_ARGS]\""],
                        capture_output=True, text=True, timeout=30)
     assert p.stdout.strip() == f"[{expect}]"
 
@@ -178,7 +180,7 @@ def test_procedure_is_the_flown_lean_script_line_for_line():
     extra = strip(SCRIPT.read_text()) - strip(FLOWN_LEAN.read_text())
     allowed_markers = ("NAME=", "case \"$", "[[ \"$NAME\"", "REPO=", "D=$REPO", "if [ \"$VARIANT\" = default ]", "cd \"$REPO\"",
                        "source /opt/ros", "R=runs/", "X=runs/", "FMU_PARSE=$D", "test ! -e $R", "mkdir -p $X",
-                       "POLICY=models/", "[ \"$OFFSET\" != 0 ]", "echo \"demo:", ".venv/bin/python tools/isolated_sitl.py start",
+                       "POLICY=models/", "[ \"$OFFSET\" != 0 ]", "[ \"$HEIGHT\" = tf ]", "echo \"demo:", ".venv/bin/python tools/isolated_sitl.py start",
                        ".venv/bin/python -u $D/guard_observer.py", "timeout 60 .venv/bin/python $D/measure_light.py",
                        "r=$(python3 $D/evaluate_window.py", "pre=$(python3 $D/preflight_state.py", "echo \"== SUPERVISED DEMO FLIGHT")
     unexplained = [l for l in extra if not l.startswith(allowed_markers)]

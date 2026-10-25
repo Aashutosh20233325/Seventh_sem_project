@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # ONE SUPERVISED DEMO RUN (PX4 SITL + Gazebo, split rendering) with every safety gate of the flown procedure.
-# Usage: tools/demo/run_demo.sh <name> <ppo|baseline|passive> [default|c1_ne|c2_sw|c5_w|gen_<name>] [0|90|180|-90]
+# Usage: tools/demo/run_demo.sh <name> <ppo|baseline|passive> [default|c1_ne|c2_sw|c5_w|gen_<name>] [0|90|180|-90] [flat|tf]
 #   name     lowercase letters/digits/_; run dir runs/sar_demo_20261018/restart_<name>, driver files in ..._driver/
 #   mode     ppo = E1R 300k seed 2 numpy policy behind the LiDAR safety filter; baseline = baseline controller;
 #            passive = everything up to the pre-flight state check, never arms or flies
 #   world    default (sim/worlds/sar_walls.sdf), a Stage C variant (target moved) or a generated world
 #            (world_generator.py: rough terrain and obstacles); the launcher refuses unknown names
 #   offset   start-heading offset in degrees (NED, + = clockwise) from the nominal east heading
+#   height   flat (default: hold 1.8 m above the take-off point) or tf (terrain following: 1.8 m above the current
+#            ground from the downward range /uav/agl_range)
 # Arms and flies in modes ppo/baseline: run only with explicit approval and a human watching (docs/PPO_DEMO_RUNBOOK.md).
 # Procedure (identical to the flown 2026-10-25 scripts, run_stagec_lean.sh): policy sha256 check; WSL memory watchdog;
 # isolated stack start; gates (topics, world target, world consistency, strict /fmu/in, render-check); six 25 s
 # stability windows; passive observer stopped by exact PID; fail-closed pre-flight state check; at most one runner call
 # (no retry); gated stop (refuses unless fresh landed/disarmed telemetry; never SIGKILL).
-NAME=${1:-}; MODE=${2:-}; VARIANT=${3:-default}; OFFSET=${4:-0}
+NAME=${1:-}; MODE=${2:-}; VARIANT=${3:-default}; OFFSET=${4:-0}; HEIGHT=${5:-flat}
 [[ "$NAME" =~ ^[a-z0-9_]{1,60}$ ]] || { echo "NAME REFUSED: '$NAME'"; exit 3; }
 case "$MODE" in passive|ppo|baseline) ;; *) echo "MODE REFUSED: '$MODE' (passive, ppo or baseline)"; exit 3;; esac
 case "$VARIANT" in default|c1_ne|c2_sw|c5_w) ;; *) [[ "$VARIANT" =~ ^gen_[a-z0-9_]{1,36}$ ]] || { echo "WORLD REFUSED: '$VARIANT' (default, c1_ne, c2_sw, c5_w, gen_<name>)"; exit 3; };; esac
 case "$OFFSET" in 0|90|180|-90) ;; *) echo "OFFSET REFUSED: '$OFFSET' (0, 90, 180, -90)"; exit 3;; esac
+case "$HEIGHT" in flat|tf) ;; *) echo "HEIGHT REFUSED: '$HEIGHT' (flat or tf)"; exit 3;; esac
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 D=$REPO/tools/demo
 if [ "$VARIANT" = default ]; then unset SAR_WORLD_VARIANT; WORLD_ARGS=""; else export SAR_WORLD_VARIANT=$VARIANT; WORLD_ARGS="--world-variant $VARIANT"; fi
@@ -40,7 +43,8 @@ echo "policy $POLICY sha256 ok"
 RUNNER_ARGS=""
 [ "$MODE" = ppo ] && RUNNER_ARGS="--policy $POLICY"
 [ "$OFFSET" != 0 ] && RUNNER_ARGS="$RUNNER_ARGS --start-yaw-offset-deg $OFFSET"
-echo "demo: name $NAME, mode $MODE, world $VARIANT, start offset $OFFSET, runner args: ${RUNNER_ARGS:-none}"
+[ "$HEIGHT" = tf ] && RUNNER_ARGS="$RUNNER_ARGS --terrain-following"
+echo "demo: name $NAME, mode $MODE, world $VARIANT, start offset $OFFSET, height $HEIGHT, runner args: ${RUNNER_ARGS:-none}"
 memlog() {  # every 10 s; flags memory exhaustion risk (MemAvailable < 600 MiB or swap used > 2.5 GiB)
   while true; do
     line=$(awk '/MemAvailable/{a=$2}/SwapTotal/{t=$2}/SwapFree/{f=$2}END{printf "%d %d", a/1024, (t-f)/1024}' /proc/meminfo)

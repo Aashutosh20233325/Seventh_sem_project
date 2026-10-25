@@ -218,13 +218,16 @@ def test_sar_oakd_bridge_remaps_global_camera_topics_to_project_names():
     assert f"{rgb}/image@sensor_msgs/msg/Image[gz.msgs.Image" in args
     assert "/depth_camera@sensor_msgs/msg/Image[gz.msgs.Image" in args
     remaps = args[args.index("--ros-args") + 1:]
-    assert remaps[0::2] == ["-r"] * 4
+    assert remaps[0::2] == ["-r"] * 5
     assert set(remaps[1::2]) == {
         f"{rgb}/image:={isolated_sitl.CAMERA_RGB_TOPIC}",
         f"{rgb}/camera_info:={isolated_sitl.CAMERA_RGB_INFO_TOPIC}",
         f"/depth_camera:={isolated_sitl.CAMERA_DEPTH_TOPIC}",
         f"/camera_info:={isolated_sitl.CAMERA_DEPTH_INFO_TOPIC}",
+        f"{isolated_sitl.PROFILES['sar_oakd'].agl_topic}:={isolated_sitl.AGL_RANGE_TOPIC}",
     }
+    assert f"{isolated_sitl.PROFILES['sar_oakd'].agl_topic}@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan" in args
+    assert "lidar_sensor_link" not in " ".join(args)
 
 
 def test_project_profile_refuses_start_without_versioned_assets(tmp_path, monkeypatch):
