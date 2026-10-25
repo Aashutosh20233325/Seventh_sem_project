@@ -25,33 +25,32 @@ search, use 180° or −90°. +90° (target 45° left) is at the live camera's e
 1. **Close Chrome and other memory-heavy applications.** The host has 7.86 GB RAM, and WSL is capped at 5 GB. With
    browsers open, Windows pages heavily and the simulation drops below the 0.35× readiness floor.
 2. **QGroundControl must be running** (its GCS heartbeat is required; see `RUNBOOK_ISOLATED.md`). Never close it during a run.
-3. **Host check (20 s):** proceed only if the median Pages/sec is below 500 and the page file is below 10 %:
-   ```bash
-   /mnt/c/Windows/System32/typeperf.exe "\Memory\Available MBytes" "\Memory\Pages/sec" "\Paging File(_Total)\% Usage" -si 1 -sc 20
-   ```
-4. Repo at a committed state with a clean tree (`git status`), and no PX4/gz processes running.
+3. Repo at a committed state with a clean tree (`git status`), and no PX4/gz processes running.
+
+(If Windows is short of memory anyway, the six stability windows of each run catch the slow simulation and the run
+stops before flying.)
 
 ## 2. One supervised flight
 
-The flown orchestration lives outside the repo, in `/home/hp/uav_ros_experiments/`. Verify its hash before use.
-
-| Purpose | Script (sha256) |
-|---|---|
-| PPO, default start | `ppo_flight_20261025/run_ppo_flight.sh <run_name>` (`03297200…7473`) |
-| PPO or baseline, turned start (90, 180, −90) | `stageb_prep_20261025/run_stageb_flight.sh <run_name> <offset> <ppo\|baseline>` (`d44c21c0…f987`) |
+Everything is in the repo under `tools/demo/` (see `docs/PROJECT_STATE_REPORT.md`):
 
 ```bash
 cd /home/hp/uav_ros
-X=/home/hp/uav_ros_experiments/stageb_prep_20261025
-bash $X/run_stageb_flight.sh restart_<YYYYMMDD>_<name> 180 ppo > $X/restart_<YYYYMMDD>_<name>.log 2>&1
-python3 $X/check_episode.py $X/restart_<...>.log runs/sar_demo_20261018/restart_<...>/logs/episode.jsonl 180 ppo
+bash tools/demo/start_qgc.sh                         # only if QGroundControl is not running yet
+bash tools/demo/run_demo.sh profdemo1 ppo default 180 > profdemo1.log 2>&1
+.venv/bin/python tools/demo/check_episode.py profdemo1.log runs/sar_demo_20261018/restart_profdemo1/logs/episode.jsonl default ppo 180
+# several runs back to back, stop rules applied after each:
+bash tools/demo/run_demo_series.sh profdemo "ppo default 0" "ppo default 180" "ppo c2_sw 0" "baseline default 0"
 ```
 
-Each script does, in order, and stops fail-closed at any failure:
-1. Checks the policy file's sha256 (`runs/rl/exp20261022_randtarget300k/E1R_s2/final_policy_numpy.npz`, `fbcacf93…0511`, read-only).
-2. Starts the bounded samplers.
-3. Starts the stack with split rendering.
-4. Runs the readiness gates: topics, world target, strict `/fmu/in`, and render-check.
+`run_demo.sh <name> <ppo|baseline|passive> [default|c1_ne|c2_sw|c5_w] [0|90|180|-90]`: mode, world (target position)
+and start-heading offset.
+
+`run_demo.sh` does, in order, and stops fail-closed at any failure:
+1. Checks the policy file's sha256 (`models/e1r_300k_s2/final_policy_numpy.npz`, `fbcacf93…0511`).
+2. Starts the WSL memory watchdog.
+3. Starts the stack with split rendering (and the chosen world).
+4. Runs the readiness gates: topics, world target, world consistency, strict `/fmu/in`, and render-check.
 5. Runs six 25 s stability windows (≥ 0.35×; gap limits).
 6. Stops the passive observer and runs the fail-closed pre-flight state check.
 7. Runs the runner **once** with `--policy` (numpy, LiDAR safety filter always on), with no retry.
@@ -75,17 +74,15 @@ uses about 66 MiB (torch is never loaded).
 - **Normal shutdown pattern:** gated stop attempt 1 confirms fresh landed, at-rest and disarmed telemetry, then reports
   "Bounded shutdown incomplete" (PX4/gz outlast the bounded stop; no SIGKILL). Attempts 2–5 refuse (no telemetry left).
   The stack then exits on its own, and the script prints "stack stopped".
-- **Between flights:** wait at least 2–3 min after the stack stops, let the previous run's bounded samplers finish,
-  then repeat the host check. Shutdown causes a Windows paging burst. It usually settles within 30–60 s, but once lasted about 10 min.
-- Several flights in a row: `stageb_prep_20261025/run_series_b.sh` is the pattern (all pre-checks, stop rules, at most one
-  re-attempt after a readiness failure, never a retried flight).
+- **Several flights in a row:** `tools/demo/run_demo_series.sh` runs them back to back. It checks before each run that no stack
+  is running, QGroundControl is up and the tree is clean. It applies the stop rules after each run, re-attempts once after a
+  readiness failure (no flight), and never retries a flown episode.
 
 ## 5. If something fails
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Stability windows below 0.35× or long gaps | Windows host paging (browsers open) | Close the applications, repeat the host check, start a new run |
-| Host check above 500 pages/s right after a run | Post-shutdown paging | Wait a few minutes and check again |
+| Stability windows below 0.35× or long gaps | Windows short of memory (browsers open) | Close the applications and start a new run |
 | `guard_refuse` before take-off | MemAvailable below 1.2 GiB or speed below 0.35× | Do not retry immediately; check host memory |
 | `POLICY CHECK FAILED` / `OFFSET REFUSED` | Wrong file or argument | Nothing started; fix the argument |
 | Gated stop refuses before PX4 exits | Telemetry not landed/disarmed | Do not stop anything; wait, and follow `DEMO_CHECKLIST.md` recovery |

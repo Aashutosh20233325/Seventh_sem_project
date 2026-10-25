@@ -226,3 +226,11 @@ def test_series_driver_refuses_bad_usage():
     for args in ([], ["Bad Name", "ppo default 0"], ["ok"]):
         p = subprocess.run(["bash", str(DEMO / "run_demo_series.sh"), *args], capture_output=True, text=True, timeout=30)
         assert p.returncode == 2 and "usage" in p.stdout
+
+
+def test_series_driver_has_no_host_check_or_waits():
+    """Requested 2026-10-25: no pre-run host check and no waits between runs (speed is gated by the stability windows)."""
+    t = (DEMO / "run_demo_series.sh").read_text()
+    code = "\n".join(l.split("#", 1)[0] for l in t.splitlines())
+    assert "host_check" not in code and "typeperf" not in code and "sleep" not in code
+    assert not (DEMO / "host_check.sh").exists()
