@@ -771,3 +771,19 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - Speed stayed close to the 0.35x floor (min 0.373) during this flight. Windows had a short paging burst (Pages Output up to 1301/s, free memory min 702 MB) after a fresh boot with QGroundControl just started.
   - The low height-above-ground readings (0.18 m) are after landing: the env's return-to-start and landing run inside the final step.
 - `explive4_1` did not fly: QGroundControl was not running after a reboot (series stop rule); `tools/demo/start_qgc.sh` started it.
+
+### Explorer live in three more hidden worlds — 2026-10-27 17:45–18:13 UTC
+
+- **Worlds:** `gen_h2_s22`, `gen_h2_s23`, `gen_h2_s24` (`88c0c84`): the next three seeds after s21, not chosen by stand-in results; target 17.1–17.5 m away, hidden from the start, 48–53 obstacles. Code `2d55dba`; series `hidden3`, explore mode, terrain following on.
+
+| Run | First sight (stand-in) | Result (stand-in) | Min LiDAR | Filter | Speed min / median | MemAvailable |
+|---|---|---|---|---|---|---|
+| `hidden3_1` gen_h2_s22 | step 138 (188) | **success, 253** (334) | 1.74 m | 20 slow, 0 stop | 0.39 / 0.46x | 1463 → 1156 MiB |
+| `hidden3_2` gen_h2_s23 | step 115 (198) | **success, 229** (350) | 2.01 m | none | 0.56 / 0.58x | 1517 → 1246 MiB |
+| `hidden3_3` gen_h2_s24 | step 223 (456) | **success, 435** (611) | 1.62 m | 13 slow, 0 stop | 0.52 / 0.55x | 1507 → 1158 MiB |
+
+- **Findings:**
+  - Live explorer record with the search fixes: 4 of 4 hidden-target worlds (with `explive5_1` in gen_h2_s21).
+  - All three found the target sooner than the stand-in predicted; routes differ from the stand-in.
+  - gen_h2_s24: the target was lost for 20 steps near a wall (back to EXPLORE at step 356) and found again by turning on the spot at step 385.
+  - The Windows typeperf samplers end after 20 minutes (`-sc 1200`), so they cover only the first two flights of this 28-minute series.
