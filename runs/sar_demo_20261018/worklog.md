@@ -753,3 +753,21 @@ During training, PPO had 2 successes, 19 collisions, and 25 timeouts. It converg
   - Terrain following works live and changes nothing on flat ground.
   - Level 2 fits on this laptop when WSL starts with about 3.7 GB free (with an extra 400 MiB process it did not).
   - The return-to-start after success uses the fixed take-off height (not terrain following): about 1.4 m above ground over this hill.
+
+## 3D step 3: frontier explorer live in gen_h2_s21 (hidden target) — 2026-10-25 to 2026-10-27
+
+- **Setup:** explore mode (explorer + PPO E1R 300k s2 for the approach), terrain following on, 2000-step limit, world `gen_h2_s21` (target hidden from the start, 17.3 m away). A 1 s recorder (`uav_ros_experiments/explorer_20261025/recorder.sh`) logged Windows memory/paging/CPU, per-component WSL CPU and memory, and GPU use on attempts 2–4.
+
+| Run | Code | Result | Notes |
+|---|---|---|---|
+| `explive_1` | `191b8a4`, RGB 1920x1080 | guard_abort `speed_below_floor`, step 161 | windows 0.38–0.41x; memory fine |
+| `explive2_1` | same | guard_abort `camera_clock_stale`, step 55 | 1.71 s gap in camera results; perception received 5.4–6.6 RGB frames/s in flight (about 14 on the ground); no Windows paging, CPU 35–47 % → the 6 MB frames were the bottleneck |
+| `explive3_1` | `98a8e17`, RGB **960x540** (approved) | guard_abort `terrain_no_return`, step 1053 | speed 0.42–0.47x, no camera gaps; flew off the world edge (map +-22 m, world +-20 m) chasing a frontier at y = 21.4; target not yet found; MemAvailable fell 1560 → 945 MiB |
+| `explive5_1` | `2d55dba`, search fixes | **success, 461 steps** | target first seen at step 359 (explore 359, approach 102: 41 planned-path, 61 PPO steps); min LiDAR 0.98 m, 10 slow / 0 stop filter steps; speed 0.37–0.40x (median 0.396); MemAvailable 1585 → 1161 MiB; GUI 3.0 cores, server 1.1, GPU 34 % median |
+
+- **Search fixes (`2d55dba`, branch `explorer-search`):** two freezes (a reached viewpoint, and the start cell, chosen again forever), a stuck approach next to walls (now PPO flies the last metres once the planned path is as close as it gets), search area limited to +-19 m, full cruise speed and turn rate, and a turn cost in viewpoint choice. Stand-in on 100 fresh hidden worlds: success 94 → 97, found within 1000 steps 76 → 83, median first sight 444 → 414 steps.
+- **Findings:**
+  - The camera resolution, not RAM, limited the earlier attempts; 960x540 removed the camera gaps.
+  - Speed stayed close to the 0.35x floor (min 0.373) during this flight. Windows had a short paging burst (Pages Output up to 1301/s, free memory min 702 MB) after a fresh boot with QGroundControl just started.
+  - The low height-above-ground readings (0.18 m) are after landing: the env's return-to-start and landing run inside the final step.
+- `explive4_1` did not fly: QGroundControl was not running after a reboot (series stop rule); `tools/demo/start_qgc.sh` started it.
