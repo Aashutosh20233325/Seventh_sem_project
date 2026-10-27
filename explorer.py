@@ -37,6 +37,9 @@ from safety_layer import LidarSafetyFilter
 
 RES = 0.4                    # m per cell
 HALF = 22.0                  # m: map covers [-HALF, HALF] in x and y
+SEARCH_HALF = 19.0           # m: the search area, [-SEARCH_HALF, SEARCH_HALF] in x and y (generated worlds span +-20 m:
+                             # outside it there is no ground for the height sensor and nothing to find); cells outside
+                             # are never goals, never on a path and give no gain
 N = int(round(2 * HALF / RES))
 UNKNOWN, FREE, OCC = 0, 1, 2
 HIT_MARGIN = 29.0            # m: a sector reading below this hit something (max range 30 m)
@@ -53,6 +56,10 @@ HEADING_TOLERANCE = math.radians(15)
 LOST_STEPS = 20              # steps without detection and without a valid estimate before exploring again
 LINE_CLEARANCE = 0.4         # m: the straight line to the target must keep this from occupied cells
 STUCK_STEPS = 60             # steps without 0.3 m progress toward the goal: give it up
+TURN_COST = 1.0              # m of path per rad of turning: a viewpoint's cost also counts the turn from the arrival
+                             # direction (or the current heading, at the start cell) to its viewing heading
+CRUISE_SPEED = 1.0           # speed action on a straight path segment (scaled by cos of the heading error)
+VIEW_TURN = 1.0              # largest turn action when turning to the viewing heading at a goal
 HEADINGS = [k * math.pi / 4 for k in range(8)]
 NEIGHBOURS = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
               (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2))]
@@ -65,7 +72,10 @@ def wrap(a):
 class ExplorerMap:
     def __init__(self):
         self.state = np.full((N, N), UNKNOWN, np.uint8)
-        self.searched = np.zeros((N, N), bool)
+        cx = -HALF + (np.arange(N) + 0.5) * RES
+        inside = np.abs(cx) <= SEARCH_HALF
+        self.outside = ~(inside[:, None] & inside[None, :])
+        self.searched = self.outside.copy()                  # nothing to search outside the area
 
     @staticmethod
     def cell(x, y):
@@ -127,7 +137,7 @@ class ExplorerMap:
         occ = self.state == OCC
         radius = int(math.ceil(INFLATE / RES))
         yy, xx = np.mgrid[-radius:radius + 1, -radius:radius + 1]
-        return ndimage.binary_dilation(occ, structure=(xx * xx + yy * yy) <= radius * radius)
+        return ndimage.binary_dilation(occ, structure=(xx * xx + yy * yy) <= radius * radius) | self.outside
 
 
 def dijkstra(start, blocked, state):
@@ -199,18 +209,24 @@ class ExplorerController:
                 best[key] = (i, j)
         return [c for c in best.values() if c not in self.failed]
 
-    def _plan(self, x, y):
+    def _plan(self, x, y, heading=0.0):
         start = self.map.cell(x, y)
         blocked = self.map.blocked()
         blocked[start] = False                         # the vehicle's own cell is always a valid start
         dist, parent = dijkstra(start, blocked, self.map.state)
         scored = []
-        for c in self._candidates(dist, blocked) + [start]:
+        for c in self._candidates(dist, blocked) + ([start] if start not in self.failed else []):
             cx, cy = self.map.centre(*c)
-            gains = [(self.map.view(cx, cy, h), h) for h in HEADINGS]
-            gain, heading = max(gains)
-            if gain > 0:
-                scored.append((gain * math.exp(-self.lam * dist[c]), c, heading, gain))
+            arrive = heading if c == start else math.atan2(cy - y, cx - x)
+            best = None
+            for h in HEADINGS:
+                g = self.map.view(cx, cy, h)
+                if g > 0:
+                    s = g * math.exp(-self.lam * (dist[c] + TURN_COST * abs(wrap(h - arrive))))
+                    if best is None or s > best[0]:
+                        best = (s, c, h, g)
+            if best is not None:
+                scored.append(best)
         if not scored:
             return None, 0
         score, c, heading, gain = max(scored)
@@ -225,20 +241,25 @@ class ExplorerController:
         if c != start and not self.path:
             self.failed.add(c)
             return None, len(scored)
+        if self.goal is None or (self.goal[0], self.goal[1]) != c:
+            self.progress = (math.inf, self.steps)           # the stuck timer restarts only for a new goal
         self.goal = (c[0], c[1], heading, score)
-        self.progress = (math.inf, self.steps)
         return self.goal, len(scored)
 
     # ---------- following ----------
 
-    def _follow(self, x, y, heading):
+    def _at_goal(self, x, y):
         gx, gy = self.map.centre(self.goal[0], self.goal[1])
-        if math.hypot(gx - x, gy - y) < GOAL_TOLERANCE or not self.path:
+        return math.hypot(gx - x, gy - y) < GOAL_TOLERANCE or not self.path
+
+    def _follow(self, x, y, heading):
+        if self._at_goal(x, y):
             err = wrap(self.goal[2] - heading)              # at the viewpoint: turn to the best viewing heading
             if abs(err) < HEADING_TOLERANCE:
-                self.since_plan = REPLAN_STEPS               # done here: plan the next goal
+                self.failed.add((self.goal[0], self.goal[1]))  # done here: never this viewpoint again (a sliver of
+                self.goal, self.since_plan = None, REPLAN_STEPS  # its predicted view may stay unseen), plan the next
                 return 0.0, 0.0
-            return 0.0, float(np.clip(err / (math.pi / 4), -1, 1)) * 0.8
+            return 0.0, float(np.clip(err / (math.pi / 4), -1, 1)) * VIEW_TURN
         while len(self.path) > 1:                            # drop passed waypoints
             px, py = self.map.centre(*self.path[0])
             if math.hypot(px - x, py - y) < LOOKAHEAD:
@@ -248,7 +269,7 @@ class ExplorerController:
         px, py = self.map.centre(*self.path[0])
         err = wrap(math.atan2(py - y, px - x) - heading)
         turn = float(np.clip(2.0 * err, -1, 1))
-        speed = 0.0 if abs(err) > math.radians(60) else 0.7 * math.cos(err)
+        speed = 0.0 if abs(err) > math.radians(60) else CRUISE_SPEED * math.cos(err)
         return speed, turn
 
     def _target_position(self, obs, x, y, heading):
@@ -308,17 +329,20 @@ class ExplorerController:
             if target is not None:
                 self.target = target
             tx, ty = self.target if self.target is not None else (None, None)
-            if tx is None or self._line_clear(x, y, tx, ty):
+            if tx is not None and not self._line_clear(x, y, tx, ty) and (getattr(self, "approach_plan", 0) <= 0
+                                                                          or not self.path):
+                self._plan_to(x, y, tx, ty)               # line blocked: go around (replan every REPLAN_STEPS)
+                self.approach_plan = REPLAN_STEPS
+            # the inner controller flies when the line is clear, or when the planned path has brought the vehicle as
+            # close as the obstacle clearance allows (a target next to a wall): its own safety filter guards the rest
+            if tx is None or self._line_clear(x, y, tx, ty) or self.goal is None or self._at_goal(x, y):
                 action = np.asarray(self.inner.act(obs), np.float32)
                 self.last = {"mode": "APPROACH", "via": "inner", "target_est": None if tx is None else
                              [round(tx, 2), round(ty, 2)], "inner": getattr(self.inner, "last", None)}
                 self.approach_plan = 0
                 return action
-            if getattr(self, "approach_plan", 0) <= 0 or not self.path:   # line blocked: go around (replan each 10)
-                self._plan_to(x, y, tx, ty)
-                self.approach_plan = REPLAN_STEPS
             self.approach_plan -= 1
-            raw = np.array(self._follow(x, y, heading), np.float32) if self.goal is not None else np.zeros(2, np.float32)
+            raw = np.array(self._follow(x, y, heading), np.float32)
             action, finfo = self.safety_filter.filter(obs, raw, self.lidar_age())
             self.last = {"mode": "APPROACH", "via": "path", "target_est": [round(tx, 2), round(ty, 2)],
                          "filter": finfo["reason"], "original": finfo["original"]}
@@ -335,7 +359,7 @@ class ExplorerController:
             elif self.path and self.map.blocked()[self.path[0]]:
                 self.since_plan = REPLAN_STEPS
         if self.goal is None or self.since_plan >= REPLAN_STEPS:
-            _, n_candidates = self._plan(x, y)
+            _, n_candidates = self._plan(x, y, heading)
             self.since_plan = 0
         self.since_plan += 1
         if self.goal is None:

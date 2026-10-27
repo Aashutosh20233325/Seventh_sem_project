@@ -116,6 +116,56 @@ def test_frontier_ranking_prefers_nearby_gain():
     assert n >= 2 and gx < 10.0                                   # the near patch wins at equal gain
 
 
+def test_search_area_bounds_goals_and_paths():
+    m = ex.ExplorerMap()
+    edge = m.cell(ex.SEARCH_HALF + 1.0, 0.0)
+    assert m.searched[edge] and m.blocked()[edge]              # outside: no gain, never on a path
+    assert not m.searched[m.cell(ex.SEARCH_HALF - 1.0, 0.0)]
+    m.state[:, :] = ex.FREE
+    assert m.view(ex.SEARCH_HALF - 2.0, 0.0, 0.0) < m.view(0.0, 0.0, 0.0)   # looking out of the area gains less
+
+
+def test_a_reached_viewpoint_is_not_chosen_again():
+    c, _, state = controller()
+    c.map.state[:, :] = ex.FREE
+    c.map.searched[:, :] = True
+    i, j = c.map.cell(3.0, 0.0)
+    c.map.searched[i - 2:i + 3, j - 2:j + 3] = False           # one unsearched patch just ahead
+    goal, _ = c._plan(0.0, 0.0, 0.0)
+    gx, gy = c.map.centre(goal[0], goal[1])
+    state["pose"] = (gx, gy, goal[2])                           # arrived, facing the viewing heading
+    c.path = []
+    c._follow(gx, gy, goal[2])
+    assert c.goal is None and (goal[0], goal[1]) in c.failed
+    c._plan(gx, gy, goal[2])
+    assert c.goal is None or (c.goal[0], c.goal[1]) != (goal[0], goal[1])
+
+
+def test_approach_hands_over_at_the_closest_reachable_point():
+    """A target behind a wall: the explorer plans around, and once the planned path is as close as the obstacle
+    clearance allows, the inner controller (with its own safety filter) flies the rest instead of stopping."""
+    c, inner, state = controller()
+    c.map.state[:, :] = ex.FREE
+    i0, j0 = c.map.cell(2.2, -0.8)
+    i1, j1 = c.map.cell(3.8, 0.8)
+    c.map.state[i0:i1 + 1, j0:j1 + 1] = ex.OCC                   # ring of walls around the target (in a corner of
+    c.map.state[i0 + 1:i1, j0 + 1:j1] = ex.FREE                  # rubble): no reachable cell has a clear line
+    c.mode, c.target = "APPROACH", (3.0, 0.0)
+    c._plan_to(0.0, 0.0, 3.0, 0.0)
+    gx, gy = c.map.centre(c.goal[0], c.goal[1])
+    assert not c._line_clear(gx, gy, 3.0, 0.0)
+    state["pose"] = (gx, gy, 0.0)
+    c.path = []                                                  # at the end of the planned path
+    obs = obs_with(np.full(so.LIDAR_SECTORS, 30.0), est=True)
+    b = -math.atan2(0.0 - gy, 3.0 - gx)                          # bearing +left at heading 0
+    obs[so.SLICES["est_bearing_sin"]], obs[so.SLICES["est_bearing_cos"]] = math.sin(b), math.cos(b)
+    obs[so.SLICES["est_range"]] = math.hypot(3.0 - gx, 0.0 - gy) / so.TARGET_RANGE_SCALE
+    calls = inner.calls
+    c.act(obs)
+    assert c.target == pytest.approx((3.0, 0.0), abs=1e-3)
+    assert inner.calls == calls + 1 and c.last["via"] == "inner"
+
+
 def test_never_reads_the_target_position():
     import inspect
     src = inspect.getsource(ex)
