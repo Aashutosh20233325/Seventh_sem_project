@@ -14,7 +14,7 @@
     <atmosphere type="adiabatic"/>
     <scene>
       <grid>false</grid>
-      <ambient>0.6 0.59 0.58 1</ambient>
+      <ambient>0.7 0.69 0.68 1</ambient>
       <background>0.08 0.08 0.09 1</background>
       <shadows>true</shadows>
     </scene>
@@ -43,7 +43,7 @@
       <cast_shadows>true</cast_shadows>
       <intensity>1</intensity>
       <direction>0.001 0.625 -0.78</direction>
-      <diffuse>0.7 0.68 0.65 1</diffuse>
+      <diffuse>0.85 0.83 0.8 1</diffuse>
       <specular>0.271 0.271 0.271 1</specular>
       <attenuation>
         <range>2000</range>
@@ -443,19 +443,480 @@
       <pose>-4.000 16.000 3.720 0 0 0</pose>
       <link name="link"><visual name="visual"><geometry><box><size>0.300 5.600 0.250</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/timber.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
     </model>
-    <light name="lamp_0" type="point">
-      <pose>0 0 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
-    <light name="lamp_1" type="point">
-      <pose>8 16 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
+    <model name="borehole_casing_0">
+      <static>true</static>
+      <pose>0.000 2.000 4.200 0.000 0.000 0.0000</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_1">
+      <static>true</static>
+      <pose>1.000 1.732 4.200 0.000 0.000 -0.5236</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_2">
+      <static>true</static>
+      <pose>1.732 1.000 4.200 0.000 0.000 -1.0472</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_3">
+      <static>true</static>
+      <pose>2.000 0.000 4.200 0.000 0.000 -1.5708</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_4">
+      <static>true</static>
+      <pose>1.732 -1.000 4.200 0.000 0.000 -2.0944</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_5">
+      <static>true</static>
+      <pose>1.000 -1.732 4.200 0.000 0.000 -2.6180</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_6">
+      <static>true</static>
+      <pose>0.000 -2.000 4.200 0.000 0.000 -3.1416</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_7">
+      <static>true</static>
+      <pose>-1.000 -1.732 4.200 0.000 0.000 -3.6652</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_8">
+      <static>true</static>
+      <pose>-1.732 -1.000 4.200 0.000 0.000 -4.1888</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_9">
+      <static>true</static>
+      <pose>-2.000 -0.000 4.200 0.000 0.000 -4.7124</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_10">
+      <static>true</static>
+      <pose>-1.732 1.000 4.200 0.000 0.000 -5.2360</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_casing_11">
+      <static>true</static>
+      <pose>-1.000 1.732 4.200 0.000 0.000 -5.7596</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.100 0.250 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="derrick_leg_0">
+      <static>true</static>
+      <pose>1.600 1.600 6.500 0 0.7356 3.9270</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.2 0.2 6.744</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="derrick_leg_1">
+      <static>true</static>
+      <pose>-1.600 1.600 6.500 0 0.7356 -0.7854</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.2 0.2 6.744</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="derrick_leg_2">
+      <static>true</static>
+      <pose>1.600 -1.600 6.500 0 0.7356 2.3562</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.2 0.2 6.744</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="derrick_leg_3">
+      <static>true</static>
+      <pose>-1.600 -1.600 6.500 0 0.7356 0.7854</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.2 0.2 6.744</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="derrick_crown">
+      <static>true</static>
+      <pose>0.000 0.000 9.200 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.900 0.900 0.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="borehole_rope">
+      <static>true</static>
+      <pose>0.000 0.000 5.800 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.040 0.040 6.400</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="sign_borehole">
+      <static>true</static>
+      <pose>-4.600 4.000 4.020 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>2.400 1.200 0.02</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/sign_borehole.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_0">
+      <static>true</static>
+      <pose>-6.864 11.045 2.985 0.436 0.000 -0.0216</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.586 0.468 0.351</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_1">
+      <static>true</static>
+      <pose>-7.641 12.117 2.960 -0.390 0.000 -0.5992</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.680 0.544 0.408</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_2">
+      <static>true</static>
+      <pose>-9.171 10.941 3.092 0.098 0.000 -1.4947</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.726 0.581 0.435</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_3">
+      <static>true</static>
+      <pose>-8.513 13.198 3.000 -0.191 0.000 0.0648</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.861 0.689 0.516</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_4">
+      <static>true</static>
+      <pose>-6.191 10.668 3.170 0.169 0.000 -1.0432</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.744 0.595 0.446</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_5">
+      <static>true</static>
+      <pose>-8.480 13.273 2.874 -0.340 0.000 1.0450</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.799 0.639 0.479</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_6">
+      <static>true</static>
+      <pose>-9.458 12.684 2.990 -0.187 0.000 -0.7361</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.591 0.473 0.355</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_7">
+      <static>true</static>
+      <pose>-10.090 12.471 3.065 -0.353 0.000 -0.6919</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.723 0.578 0.434</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_8">
+      <static>true</static>
+      <pose>-8.733 11.817 0.642 0.146 0.000 1.3089</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.829 0.664 0.498</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_9">
+      <static>true</static>
+      <pose>-8.075 13.081 2.081 0.332 0.000 -0.8617</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.988 0.790 0.593</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_10">
+      <static>true</static>
+      <pose>-8.383 12.830 1.638 0.168 0.000 0.9410</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.574 0.459 0.344</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_11">
+      <static>true</static>
+      <pose>-9.609 11.962 2.565 0.368 0.000 -1.5654</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.903 0.723 0.542</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_12">
+      <static>true</static>
+      <pose>-8.302 13.206 2.528 0.481 0.000 -0.5195</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.968 0.775 0.581</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_chunk_13">
+      <static>true</static>
+      <pose>-8.592 11.669 1.023 0.000 0.000 1.0595</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.744 0.595 0.446</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_timber_0">
+      <static>true</static>
+      <pose>-8.425 11.755 3.050 0.000 -0.071 -1.0456</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>3.000 0.250 0.250</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/timber.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_0_timber_1">
+      <static>true</static>
+      <pose>-8.962 11.258 3.050 0.000 -0.275 -1.0998</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>3.000 0.250 0.250</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/timber.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="sign_rooffall_0">
+      <static>true</static>
+      <pose>-8.000 12.000 3.400 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>2.000 1.000 0.02</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/sign_rooffall.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_0">
+      <static>true</static>
+      <pose>16.496 -5.137 3.290 0.332 0.000 -0.9723</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.938 0.751 0.563</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_1">
+      <static>true</static>
+      <pose>16.256 -4.210 3.191 0.184 0.000 1.4952</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.443 0.355 0.266</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_2">
+      <static>true</static>
+      <pose>15.930 -3.485 3.352 -0.396 0.000 -0.4988</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.705 0.564 0.423</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_3">
+      <static>true</static>
+      <pose>14.804 -5.120 3.232 -0.483 0.000 0.5968</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.721 0.576 0.432</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_4">
+      <static>true</static>
+      <pose>14.860 -4.634 3.202 -0.047 0.000 -1.3531</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.730 0.584 0.438</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_5">
+      <static>true</static>
+      <pose>17.992 -5.315 3.410 -0.470 0.000 0.2531</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.789 0.631 0.474</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_6">
+      <static>true</static>
+      <pose>14.175 -4.007 3.243 0.187 0.000 0.6164</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.505 0.404 0.303</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_7">
+      <static>true</static>
+      <pose>15.269 -4.051 3.516 0.205 0.000 -0.2046</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.876 0.701 0.525</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_8">
+      <static>true</static>
+      <pose>13.814 -5.178 0.344 0.371 0.000 -0.8499</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.852 0.682 0.511</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_9">
+      <static>true</static>
+      <pose>17.331 -4.250 0.379 0.208 0.000 -0.0608</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.804 0.643 0.483</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_10">
+      <static>true</static>
+      <pose>17.236 -5.257 2.759 0.285 0.000 0.2268</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.000 0.800 0.600</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_11">
+      <static>true</static>
+      <pose>15.485 -3.983 0.764 -0.137 0.000 -1.0810</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.501 0.401 0.301</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_12">
+      <static>true</static>
+      <pose>14.595 -5.193 2.126 -0.246 0.000 0.3192</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.823 0.658 0.494</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_chunk_13">
+      <static>true</static>
+      <pose>14.552 -4.251 2.426 0.083 0.000 -1.3413</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.901 0.721 0.541</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/rock.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_timber_0">
+      <static>true</static>
+      <pose>14.649 -3.602 3.380 0.000 -0.026 -0.2690</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>3.000 0.250 0.250</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/timber.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rooffall_1_timber_1">
+      <static>true</static>
+      <pose>14.854 -4.573 3.380 0.000 -0.164 0.6132</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>3.000 0.250 0.250</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/timber.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="sign_rooffall_1">
+      <static>true</static>
+      <pose>16.000 -4.000 3.730 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>2.000 1.000 0.02</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/sign_rooffall.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_0_-1">
+      <static>true</static>
+      <pose>-8.550 -4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_0_1">
+      <static>true</static>
+      <pose>-7.450 -4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_1_-1">
+      <static>true</static>
+      <pose>-4.000 -8.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_1_1">
+      <static>true</static>
+      <pose>-4.000 -7.450 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_2_-1">
+      <static>true</static>
+      <pose>-0.550 -4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_2_1">
+      <static>true</static>
+      <pose>0.550 -4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_3_-1">
+      <static>true</static>
+      <pose>4.000 -8.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_3_1">
+      <static>true</static>
+      <pose>4.000 -7.450 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_4_-1">
+      <static>true</static>
+      <pose>-4.000 -0.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_4_1">
+      <static>true</static>
+      <pose>-4.000 0.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_5_-1">
+      <static>true</static>
+      <pose>-0.550 4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_5_1">
+      <static>true</static>
+      <pose>0.550 4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_6_-1">
+      <static>true</static>
+      <pose>4.000 -0.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_6_1">
+      <static>true</static>
+      <pose>4.000 0.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_7_-1">
+      <static>true</static>
+      <pose>7.450 4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_7_1">
+      <static>true</static>
+      <pose>8.550 4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_8_-1">
+      <static>true</static>
+      <pose>12.000 -0.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_8_1">
+      <static>true</static>
+      <pose>12.000 0.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_9_-1">
+      <static>true</static>
+      <pose>15.450 4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_9_1">
+      <static>true</static>
+      <pose>16.550 4.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_10_-1">
+      <static>true</static>
+      <pose>-4.000 7.450 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_10_1">
+      <static>true</static>
+      <pose>-4.000 8.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_11_-1">
+      <static>true</static>
+      <pose>-0.550 12.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_11_1">
+      <static>true</static>
+      <pose>0.550 12.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_12_-1">
+      <static>true</static>
+      <pose>4.000 7.450 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_12_1">
+      <static>true</static>
+      <pose>4.000 8.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_13_-1">
+      <static>true</static>
+      <pose>7.450 12.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_13_1">
+      <static>true</static>
+      <pose>8.550 12.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_14_-1">
+      <static>true</static>
+      <pose>15.450 12.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_14_1">
+      <static>true</static>
+      <pose>16.550 12.000 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.070 8.000 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_15_-1">
+      <static>true</static>
+      <pose>-4.000 15.450 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="rail_15_1">
+      <static>true</static>
+      <pose>-4.000 16.550 0.030 0 0 0</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>8.000 0.070 0.060</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_5_body">
+      <static>true</static>
+      <pose>16.000 4.000 0.400 0.000 0.000 1.5708</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.400 0.900 0.500</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel_rust.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_5_wheel_0">
+      <static>true</static>
+      <pose>16.350 4.450 0.120 0.000 0.000 1.5708</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_5_wheel_1">
+      <static>true</static>
+      <pose>15.650 4.450 0.120 0.000 0.000 1.5708</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_5_wheel_2">
+      <static>true</static>
+      <pose>16.350 3.550 0.120 0.000 0.000 1.5708</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_5_wheel_3">
+      <static>true</static>
+      <pose>15.650 3.550 0.120 0.000 0.000 1.5708</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_1_body">
+      <static>true</static>
+      <pose>-4.000 -8.000 0.400 0.000 0.000 0.0000</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>1.400 0.900 0.500</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel_rust.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_1_wheel_0">
+      <static>true</static>
+      <pose>-3.550 -8.350 0.120 0.000 0.000 0.0000</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_1_wheel_1">
+      <static>true</static>
+      <pose>-3.550 -7.650 0.120 0.000 0.000 0.0000</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_1_wheel_2">
+      <static>true</static>
+      <pose>-4.450 -8.350 0.120 0.000 0.000 0.0000</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
+    <model name="cart_1_wheel_3">
+      <static>true</static>
+      <pose>-4.450 -7.650 0.120 0.000 0.000 0.0000</pose>
+      <link name="link"><visual name="visual"><geometry><box><size>0.240 0.080 0.240</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/steel.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
+    </model>
   </world>
 </sdf>

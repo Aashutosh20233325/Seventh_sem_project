@@ -75,7 +75,8 @@ def test_target_is_the_worker_and_the_mine_is_lit(name):
     assert uris == ["model://rescue_worker/meshes/rescue_randy.dae"]       # the worker, not the red sphere
     assert target.find(".//collision/geometry/sphere/radius").text.strip() == "0.5"
     assert all("1 0 0" not in (m.text or "") for m in target.iter("diffuse"))
-    assert len(world.findall("light[@type='point']")) >= mg.LAMP_JUNCTIONS
+    assert world.findall("light[@type='point']") == []                     # no lamps: they made rendering stall
+    assert float(world.findtext("scene/ambient").split()[0]) >= 0.6         # lit by ambient and overhead light
     assert world.findall(".//collision/geometry/mesh") == []                # no mesh collision (DART crash)
     terrain = world.find("model[@name='terrain']")
     assert terrain.find("link/collision") is None                           # visual floor only (a floor collision box
@@ -101,3 +102,44 @@ def test_gazebo_accepts_the_mine(name):
     d = sar_task.WORLD_VARIANTS / name
     p = subprocess.run(["gz", "sdf", "-k", "sar_walls.sdf"], cwd=d, capture_output=True, text=True, timeout=60)
     assert "Valid" in p.stdout, p.stdout + p.stderr
+
+
+DECOR = ("borehole_", "derrick_", "sign_", "rooffall_", "rail_", "cart_", "timber_")
+
+
+@pytest.mark.parametrize("name", COMMITTED)
+def test_story_props_are_visual_only_and_clear_of_the_flight(name):
+    """Borehole, derrick, plaques, roof-fall chunks, rails and carts: no collision (physics and the stand-in ignore
+    them); the rope ends above the 1.8 m flight height; carts and rails are low enough to fly over; roof-fall chunks
+    stick out at most 0.15 m (+ chunk half-size slack) beyond the block they decorate."""
+    world = ET.parse(sar_task.WORLD_VARIANTS / name / "sar_walls.sdf").getroot().find("world")
+    spec = json.loads((sar_task.WORLD_VARIANTS / name / "spec.json").read_text())
+    import re
+    props = [m for m in world.findall("model") if m.get("name", "").startswith(DECOR)
+             and not re.fullmatch(r"rooffall_\d+", m.get("name"))]          # the obstacle boxes themselves are solid
+    assert len(props) > 60 and all(m.find(".//collision") is None for m in props)
+    by = {m.get("name"): m for m in props}
+    rope = by["borehole_rope"]
+    z = float(rope.findtext("pose").split()[2]); h = float(rope.findtext(".//box/size").split()[2])
+    assert z - h / 2 >= 2.5                                                   # rope ends above the drone
+    for m in props:
+        n = m.get("name")
+        if n.startswith(("cart_", "rail_")):
+            z = float(m.findtext("pose").split()[2]); h = float(m.findtext(".//box/size").split()[2])
+            assert z + h / 2 <= wg.LOW_TOP                                    # flown over like debris
+    falls = [b for b in spec["obstacles"] if b["kind"] == "rooffall"]
+    for m in props:
+        if "_chunk_" in m.get("name"):
+            ned_y, ned_x = (float(v) for v in m.findtext("pose").split()[:2])   # SDF poses are ENU (east, north)
+            s = max(float(v) for v in m.findtext(".//box/size").split())
+            assert any(abs(ned_x - b["x"]) <= b["sx"] / 2 + 0.15 + s / 2 and abs(ned_y - b["y"]) <= b["sy"] / 2 + 0.15 + s / 2
+                       for b in falls)
+
+
+def test_plaques_never_look_like_a_target():
+    from pathlib import Path
+    from PIL import Image
+    import target_perception as tp
+    d = Path(__file__).resolve().parent / "sim/models/mine_textures/materials/textures"
+    for f in sorted(d.glob("*.png")):
+        assert int(tp.target_mask(np.asarray(Image.open(f).convert("RGB"))).sum()) == 0, f.name

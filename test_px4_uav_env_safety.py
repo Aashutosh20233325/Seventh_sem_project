@@ -2264,11 +2264,16 @@ def test_land_beside_target_hops_to_the_approach_side_facing_the_target(monkeypa
     env = make_environment(module)
     env.target = SimpleNamespace(x_ned=3.0, y_ned=-3.0)
     env.node.x, env.node.y = 3.0, -3.6               # arrived from the west (smaller y)
-    flown, calls = [], []
+    flown, calls, drops = [], [], []
     env._fly_to = lambda x, y, z, yaw: flown.append((x, y, z, yaw))
     env._enter_safe_state = lambda: calls.append("land")
+    env._drop_supply_packet = lambda x, y: drops.append((x, y))
 
     module.PX4UAVEnv._land_beside_target(env)
+
+    (dx, dy), = drops                                   # packet beside the target, at right angles to the approach
+    assert math.hypot(dx - 3.0, dy + 3.0) == pytest.approx(module.PX4UAVEnv.SUPPLY_DROP_M, abs=1e-3)
+    assert abs(dy + 3.0) < 1e-3 and env._supply_drop == (dx, dy)          # approach was along y: packet along x
 
     (x, y, z, yaw), = flown
     assert (x, y) == pytest.approx((3.0, -3.0 - module.PX4UAVEnv.BESIDE_TARGET_M))
@@ -2286,11 +2291,39 @@ def test_failed_hop_beside_target_lands_in_place(monkeypatch):
         raise TimeoutError("blocked")
     env._fly_to = fail
     env._enter_safe_state = lambda: calls.append("land")
+    env._drop_supply_packet = lambda x, y: False
 
     with pytest.warns(RuntimeWarning, match="landing in place"):
         module.PX4UAVEnv._land_beside_target(env)
 
     assert calls == ["land"]
+
+
+def test_supply_packet_failure_is_only_a_warning(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+
+    def boom(*a, **k):
+        raise FileNotFoundError("gz")
+    monkeypatch.setattr(module.subprocess, "run", boom)
+    with pytest.warns(RuntimeWarning, match="Supply packet could not be spawned"):
+        assert module.PX4UAVEnv._drop_supply_packet(env, 3.0, -2.2) is False
+
+
+def test_supply_packet_request_targets_the_world_in_enu(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    seen = {}
+
+    def fake_run(cmd, **k):
+        seen["cmd"] = cmd
+        return SimpleNamespace(stdout="data: true\n", stderr="")
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    assert module.PX4UAVEnv._drop_supply_packet(env, 3.0, -2.2) is True
+    cmd = seen["cmd"]
+    assert cmd[:4] == ["gz", "service", "-s", "/world/sar_walls/create"]
+    req = cmd[cmd.index("--req") + 1]
+    assert "x: -2.200, y: 3.000" in req and "supply_packet" in req and '"' not in req.split('sdf: "')[1].split('" name')[0]
 
 
 def stuck_environment(module, **node_state):

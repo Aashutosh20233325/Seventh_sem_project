@@ -1,6 +1,7 @@
 import dataclasses
 import math
 import os
+import subprocess
 import threading
 import time
 import warnings
@@ -923,6 +924,9 @@ class PX4UAVEnv(gym.Env):
     START_Y = 0.0
     START_YAW = math.pi / 2
     REPOSITION_TOLERANCE = 0.3          # m horizontal
+    SUPPLY_DROP_M = 0.8                 # supply packet: this far from the target centre, beside it (on its pad)
+    SUPPLY_DROP_HEIGHT = 1.3            # m above the floor where the packet is released (it falls onto the pad)
+    GZ_WORLD = "sar_walls"              # Gazebo world name of every world variant
     BESIDE_TARGET_M = 1.1               # land_beside_target: landing point this far from the target centre (on the
                                         # target's 3 x 3 m pad, the only solid ground there besides the start pad)
     REPOSITION_Z_TOLERANCE = 0.25       # m
@@ -1724,6 +1728,9 @@ class PX4UAVEnv(gym.Env):
         tx, ty = self.target.x_ned, self.target.y_ned
         d = math.hypot(x - tx, y - ty)
         ux, uy = ((x - tx) / d, (y - ty) / d) if d > 1e-3 else (1.0, 0.0)
+        # the supply packet lands beside the target, at right angles to the approach (clear of the landing point)
+        self._supply_drop = (round(tx - uy * self.SUPPLY_DROP_M, 3), round(ty + ux * self.SUPPLY_DROP_M, 3))
+        self._drop_supply_packet(*self._supply_drop)
         px, py = tx + ux * self.BESIDE_TARGET_M, ty + uy * self.BESIDE_TARGET_M
         try:
             self._fly_to(px, py, self.node.TAKEOFF_TARGET_Z, math.atan2(ty - py, tx - px))
@@ -1734,6 +1741,32 @@ class PX4UAVEnv(gym.Env):
                 stacklevel=2,
             )
         self._enter_safe_state()
+
+    def _drop_supply_packet(self, x, y):
+        """Spawn the supply packet (a 2 kg box, yellow with a blue band) above (x, y) NED in the running Gazebo world;
+        it falls onto the target pad. Presentation only: any failure is a warning and the landing continues."""
+        sdf = ("<sdf version='1.9'><model name='supply_packet'><link name='link'><inertial><mass>2.0</mass><inertia>"
+               "<ixx>0.03</ixx><iyy>0.04</iyy><izz>0.05</izz></inertia></inertial><collision name='c'><geometry><box>"
+               "<size>0.45 0.32 0.26</size></box></geometry></collision><visual name='case'><geometry><box><size>0.45 0.32 "
+               "0.26</size></box></geometry><material><ambient>0.95 0.75 0.05 1</ambient><diffuse>0.95 0.75 0.05 1"
+               "</diffuse></material></visual><visual name='band'><geometry><box><size>0.46 0.07 0.27</size></box>"
+               "</geometry><material><ambient>0.1 0.35 0.85 1</ambient><diffuse>0.1 0.35 0.85 1</diffuse></material>"
+               "</visual></link></model></sdf>")
+        req = (f'sdf: "{sdf}" name: "supply_packet" allow_renaming: true '
+               f'pose: {{position: {{x: {y:.3f}, y: {x:.3f}, z: {self.SUPPLY_DROP_HEIGHT}}}}}')
+        try:
+            result = subprocess.run(
+                ["gz", "service", "-s", f"/world/{self.GZ_WORLD}/create", "--reqtype", "gz.msgs.EntityFactory",
+                 "--reptype", "gz.msgs.Boolean", "--timeout", "3000", "--req", req],
+                capture_output=True, text=True, timeout=10)
+            ok = "data: true" in result.stdout
+        except Exception as exc:                          # gz missing, timeout: presentation only
+            ok, result = False, exc
+        if ok:
+            print(f"SUPPLY PACKET DROPPED beside the target at NED ({x:.2f}, {y:.2f})", flush=True)
+        else:
+            warnings.warn(f"Supply packet could not be spawned: {result}", RuntimeWarning, stacklevel=2)
+        return ok
 
     def _confirm_ground_before_flight(self, timeout):
         """Before any flight command: bounded wait for fresh disarmed + landed telemetry.
@@ -2035,6 +2068,8 @@ class PX4UAVEnv(gym.Env):
             "step": self.current_step,
             "privileged": self._privileged_info(),
         }
+        if getattr(self, "_supply_drop", None) is not None:
+            info["supply_drop_ned"] = list(self._supply_drop)
 
         return (
             observation,
