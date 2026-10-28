@@ -14,7 +14,7 @@
     <atmosphere type="adiabatic"/>
     <scene>
       <grid>false</grid>
-      <ambient>0.32 0.31 0.3 1</ambient>
+      <ambient>0.42 0.41 0.4 1</ambient>
       <background>0.08 0.08 0.09 1</background>
       <shadows>true</shadows>
     </scene>
@@ -444,56 +444,14 @@
       <link name="link"><visual name="visual"><geometry><box><size>0.300 5.600 0.250</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><pbr><metal><albedo_map>model://mine_textures/materials/textures/timber.png</albedo_map><roughness>0.95</roughness><metalness>0</metalness></metal></pbr></material></visual></link>
     </model>
     <light name="lamp_0" type="point">
-      <pose>-8 -8 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
-    <light name="lamp_1" type="point">
-      <pose>0 -8 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
-    <light name="lamp_2" type="point">
-      <pose>8 -8 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
-    <light name="lamp_3" type="point">
       <pose>16 -8 3.6 0 0 0</pose>
       <diffuse>1.0 0.95 0.85 1</diffuse>
       <specular>0.1 0.1 0.1 1</specular>
       <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
       <cast_shadows>false</cast_shadows>
     </light>
-    <light name="lamp_4" type="point">
+    <light name="lamp_1" type="point">
       <pose>0 0 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
-    <light name="lamp_5" type="point">
-      <pose>16 0 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
-    <light name="lamp_6" type="point">
-      <pose>0 8 3.6 0 0 0</pose>
-      <diffuse>1.0 0.95 0.85 1</diffuse>
-      <specular>0.1 0.1 0.1 1</specular>
-      <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
-      <cast_shadows>false</cast_shadows>
-    </light>
-    <light name="lamp_7" type="point">
-      <pose>16 8 3.6 0 0 0</pose>
       <diffuse>1.0 0.95 0.85 1</diffuse>
       <specular>0.1 0.1 0.1 1</specular>
       <attenuation><range>12</range><constant>0.4</constant><linear>0.03</linear><quadratic>0.005</quadratic></attenuation>
