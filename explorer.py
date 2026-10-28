@@ -43,6 +43,10 @@ SEARCH_HALF = 19.0           # m: the search area, [-SEARCH_HALF, SEARCH_HALF] i
 N = int(round(2 * HALF / RES))
 UNKNOWN, FREE, OCC = 0, 1, 2
 HIT_MARGIN = 29.0            # m: a sector reading below this hit something (max range 30 m)
+HIT_MARK_MAX = 15.0          # m: hits beyond this are not marked occupied (a sector's minimum lies anywhere across its
+                             # 5.5 deg wedge but is marked on the centre ray: far hits seen at a shallow angle put
+                             # phantom walls inside free tunnels); the wedge is still marked free up to the reading.
+                             # 15 m: mines 93 -> 100/100 found (fresh seeds), open worlds unchanged (stand-in, 2026-10-28)
 CAM_HALF_FOV = 0.6           # rad (stand-in model: 0.5 * 1.204)
 CAM_MIN, CAM_MAX = 1.0, 10.0  # m of ground in view from 1.8 m with the 30 deg down-pitched camera
 INFLATE = 1.0                # m clearance from obstacles for planning
@@ -115,7 +119,7 @@ class ExplorerMap:
         fi, fj = i[free], j[free]
         keep = self.state[fi, fj] != OCC
         self.state[fi[keep], fj[keep]] = FREE
-        hit = ranges < HIT_MARGIN
+        hit = ranges < min(HIT_MARGIN, HIT_MARK_MAX)
         hi = np.floor((x + ranges[hit] * np.cos(centre[hit]) + HALF) / RES).astype(int)
         hj = np.floor((y + ranges[hit] * np.sin(centre[hit]) + HALF) / RES).astype(int)
         ok = (hi >= 0) & (hi < N) & (hj >= 0) & (hj < N)

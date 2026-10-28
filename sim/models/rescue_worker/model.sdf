@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <!-- Visual only: the target model's own collision sphere (sar_task.load_target) is the physical target. -->
+  <model name="rescue_worker">
+    <static>true</static>
+    <link name="link">
+      <pose>0 0 -0.623996 0 0 0</pose>
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>model://rescue_worker/meshes/rescue_randy.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>

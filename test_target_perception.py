@@ -111,6 +111,43 @@ def test_recorded_gazebo_frames(name, truth_deg, edge):
     assert abs(math.degrees(det.bearing) - truth_deg) < (1.0 if edge else 0.2)
 
 
+# Rendered colours measured in Gazebo frames (concept scenes, 2026-10-28): jacket in tunnel lamp light and in sunlight,
+# then things that must never count as a target.
+HIVIS_JACKET = [(113, 121, 44), (154, 156, 54), (100, 106, 38)]
+NOT_TARGETS = {"yellow supply case": (130, 115, 36), "caution tape": (250, 205, 20), "warning sign": (230, 190, 30),
+               "foliage / tarp": (53, 71, 33), "tree canopy": (51, 102, 38), "sand": (150, 134, 112),
+               "concrete": (150, 146, 138), "dark rock": (78, 70, 62), "dim jacket (too dark)": (50, 55, 18)}
+
+
+def test_hivis_mask_accepts_jackets_and_rejects_lookalikes():
+    for c in HIVIS_JACKET:
+        assert tp.hivis_mask(np.array([[c]], np.uint8))[0, 0], c
+    for name, c in NOT_TARGETS.items():
+        px = np.array([[c]], np.uint8)
+        assert not tp.hivis_mask(px)[0, 0] and not tp.target_mask(px)[0, 0], name
+
+
+@pytest.mark.parametrize("distance", [3.0, 6.0, 9.0])
+@pytest.mark.parametrize("bearing", [0.0, 20.0])
+def test_hivis_target_detected_with_bearing_and_range(distance, bearing):
+    uav, yaw = uav_at(distance, bearing)
+    rgb, depth = ss.render(uav, yaw, color="hivis")
+    assert tp.red_mask(rgb).sum() == 0 and tp.hivis_mask(rgb).sum() > 0   # found by the hi-vis rule alone
+    det = tp.detect(rgb, depth, ss.K_RGB, ss.K_DEPTH)
+    true_bearing, true_range = ss.truth_in_body(uav, yaw, TARGET)
+    assert det.detected and det.range_valid
+    assert abs(math.degrees(det.bearing - true_bearing)) < 0.5
+    assert abs(det.horizontal_range - true_range) / true_range < 0.02
+
+
+def test_large_yellow_and_sand_areas_are_not_targets():
+    for name in ("yellow supply case", "caution tape", "sand"):
+        rgb = np.zeros((540, 960, 3), np.uint8)
+        rgb[200:340, 380:580] = NOT_TARGETS[name]
+        depth = np.full((480, 640), 5.0, np.float32)
+        assert not tp.detect(rgb, depth, ss.intrinsics(960, 540, 1.204), ss.K_DEPTH).detected, name
+
+
 def test_message_round_trip_and_rejection():
     uav, yaw = uav_at(4.31, 0.0)
     det = tp.detect(*ss.render(uav, yaw), ss.K_RGB, ss.K_DEPTH)

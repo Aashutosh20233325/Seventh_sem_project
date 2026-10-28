@@ -116,6 +116,23 @@ def test_frontier_ranking_prefers_nearby_gain():
     assert n >= 2 and gx < 10.0                                   # the near patch wins at equal gain
 
 
+def test_far_shallow_hits_do_not_put_phantom_walls_in_a_tunnel():
+    """Looking down a 5 m wide tunnel, a sector's minimum comes from a side wall at the edge of its wedge, far away; it
+    must not be marked on the centre ray inside the free tunnel (HIT_MARK_MAX), while near hits still are."""
+    m = ex.ExplorerMap()
+    ranges = np.full(so.LIDAR_SECTORS, 30.0)
+    for k, a in enumerate(ex.SECTOR_ANGLES):             # side walls at +-2.5 m along a north-going tunnel
+        for edge in (a - 0.048, a + 0.048):
+            if abs(math.sin(edge)) > 1e-6:
+                ranges[k] = min(ranges[k], abs(2.5 / math.sin(edge)))
+    m.update_lidar(0.0, 0.0, 0.0, obs_with(np.minimum(ranges, 30.0)))
+    occ_inside = [(x, y) for x in np.arange(1.0, 20.0, 0.4) for y in np.arange(-1.6, 1.6, 0.4)
+                  if m.state[m.cell(x, y)] == ex.OCC]
+    assert occ_inside == []                                # no phantom wall in the tunnel's free middle
+    assert m.state[m.cell(0.3, 2.6)] == ex.OCC or m.state[m.cell(0.3, -2.6)] == ex.OCC or any(
+        m.state[m.cell(x, s * 2.6)] == ex.OCC for x in np.arange(0.0, 6.0, 0.4) for s in (-1, 1))   # near walls marked
+
+
 def test_search_area_bounds_goals_and_paths():
     m = ex.ExplorerMap()
     edge = m.cell(ex.SEARCH_HALF + 1.0, 0.0)

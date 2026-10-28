@@ -71,6 +71,21 @@ def red_mask(rgb):
     return (r > 40) & (r > 2 * g) & (r > 2 * b)
 
 
+def hivis_mask(rgb):
+    """High-visibility yellow-green (a worker's or survivor's hi-vis jacket). Measured in rendered Gazebo frames: the
+    jacket has red/green 0.92-0.99 (tunnel lamps to sunlight) and blue/green 0.3-0.46; yellow (supply cases, caution
+    tape, warning signs) has red/green >= 1.14, foliage <= 0.75, sand and concrete blue/green >= 0.8."""
+    r = rgb[..., 0].astype(np.int16)
+    g = rgb[..., 1].astype(np.int16)
+    b = rgb[..., 2].astype(np.int16)
+    return (g >= 60) & (20 * r >= 17 * g) & (20 * r <= 21 * g) & (2 * b <= g)
+
+
+def target_mask(rgb):
+    """Pixels of either target marker: the red sphere or a hi-vis jacket."""
+    return red_mask(rgb) | hivis_mask(rgb)
+
+
 def pixel_rays(u, v, K):
     """Camera-frame ray directions with x = 1 for pixel coordinates (u, v)."""
     u = np.asarray(u, float)
@@ -112,7 +127,7 @@ def detect(rgb, depth, K_rgb, K_depth, stride=None):
     if stride is None:
         stride = 2 if rgb.shape[1] >= 1600 else 1
     min_blob_px = MIN_BLOB_PX_FULLRES * rgb.shape[0] * rgb.shape[1] / (REFERENCE_SIZE[0] * REFERENCE_SIZE[1])
-    mask = red_mask(rgb[::stride, ::stride])
+    mask = target_mask(rgb[::stride, ::stride])
     labels, n = ndimage.label(mask)
     if n == 0:
         return Detection(False, STATUS_NO_TARGET)

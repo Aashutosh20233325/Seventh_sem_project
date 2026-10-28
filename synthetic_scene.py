@@ -62,8 +62,9 @@ def _cast(origin, dirs, target, radius):
 
 
 def render(uav_pos, yaw, target=(3.0, -3.0, 0.055), radius=0.5, pitch=0.0, roll=0.0,
-           rgb_size=RGB_SIZE, depth_size=DEPTH_SIZE, K_rgb=None, K_depth=None):
-    """Return (rgb uint8 HxWx3, planar depth float32 hxw). ``target=None`` renders an empty floor."""
+           rgb_size=RGB_SIZE, depth_size=DEPTH_SIZE, K_rgb=None, K_depth=None, color="red"):
+    """Return (rgb uint8 HxWx3, planar depth float32 hxw). ``target=None`` renders an empty floor; ``color`` "hivis"
+    shades the sphere like a hi-vis jacket (red/green 0.95, blue/green 0.35) instead of red."""
     K_rgb = K_RGB if K_rgb is None else K_rgb
     K_depth = K_DEPTH if K_depth is None else K_depth
     cam, R = camera_pose(uav_pos, yaw, pitch, roll)
@@ -88,7 +89,11 @@ def render(uav_pos, yaw, target=(3.0, -3.0, 0.055), radius=0.5, pitch=0.0, roll=
         n = cam + dirs[sphere] * t_sphere[sphere, None] - tgt
         n /= np.linalg.norm(n, axis=1, keepdims=True)
         lam = np.clip(n @ light, 0.0, 1.0)
-        rgb[sphere] = np.stack([60 + 180 * lam, 8 * lam, 8 * lam], 1)
+        if color == "hivis":
+            v = 70 + 170 * lam
+            rgb[sphere] = np.stack([0.95 * v, v, 0.35 * v], 1)
+        else:
+            rgb[sphere] = np.stack([60 + 180 * lam, 8 * lam, 8 * lam], 1)
     rgb = rgb.reshape(rgb_size[1], rgb_size[0], 3).astype(np.uint8)
 
     dirs_d, norm_d = rays(depth_size, K_depth)

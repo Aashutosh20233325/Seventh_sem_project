@@ -299,7 +299,8 @@ def terrain_obj(spec) -> str:
     return "\n".join(lines) + "\n"
 
 
-COLORS = {"ruin": "0.55 0.5 0.45 1", "wreck": "0.3 0.32 0.28 1", "rubble": "0.45 0.42 0.38 1", "tree": "0.35 0.25 0.15 1"}
+COLORS = {"ruin": "0.55 0.5 0.45 1", "wreck": "0.3 0.32 0.28 1", "rubble": "0.45 0.42 0.38 1", "tree": "0.35 0.25 0.15 1",
+          "rock": "0.3 0.27 0.24 1", "rooffall": "0.42 0.38 0.33 1", "debris": "0.38 0.35 0.31 1"}   # last three: mines
 
 
 def box_model(name, b: dict) -> str:
