@@ -109,31 +109,33 @@ DECOR = ("borehole_", "derrick_", "sign_", "rooffall_", "rail_", "cart_", "timbe
 
 @pytest.mark.parametrize("name", COMMITTED)
 def test_story_props_are_visual_only_and_clear_of_the_flight(name):
-    """Borehole, derrick, plaques, roof-fall chunks, rails and carts: no collision (physics and the stand-in ignore
-    them); the rope ends above the 1.8 m flight height; carts and rails are low enough to fly over; roof-fall chunks
-    stick out at most 0.15 m (+ chunk half-size slack) beyond the block they decorate."""
+    """Borehole, derrick, plaques, roof-fall chunks, rails, carts and timber sets: visuals of ONE static model with no
+    collision (physics and the stand-in ignore them; one entity keeps Gazebo's memory down); the rope ends above the
+    1.8 m flight height; carts and rails are low enough to fly over; roof-fall chunks stick out at most 0.15 m (+ chunk
+    half-size slack) beyond the block they decorate."""
     world = ET.parse(sar_task.WORLD_VARIANTS / name / "sar_walls.sdf").getroot().find("world")
     spec = json.loads((sar_task.WORLD_VARIANTS / name / "spec.json").read_text())
-    import re
-    props = [m for m in world.findall("model") if m.get("name", "").startswith(DECOR)
-             and not re.fullmatch(r"rooffall_\d+", m.get("name"))]          # the obstacle boxes themselves are solid
-    assert len(props) > 60 and all(m.find(".//collision") is None for m in props)
-    by = {m.get("name"): m for m in props}
-    rope = by["borehole_rope"]
-    z = float(rope.findtext("pose").split()[2]); h = float(rope.findtext(".//box/size").split()[2])
-    assert z - h / 2 >= 2.5                                                   # rope ends above the drone
-    for m in props:
-        n = m.get("name")
+    names = [m.get("name") for m in world.findall("model")]
+    assert not any(n.startswith(DECOR) for n in names if not n.startswith("rooffall_"))   # no separate prop models
+    props = world.find("model[@name='mine_props']")
+    assert props.find(".//collision") is None
+    vis = {v.get("name"): v for v in props.iter("visual")}
+    assert len(vis) > 100 and all(n.startswith(DECOR) for n in vis)
+    pose = lambda v: [float(x) for x in v.findtext("pose").split()]          # noqa: E731
+    size = lambda v: [float(x) for x in v.findtext("geometry/box/size").split()]   # noqa: E731
+    rope = vis["borehole_rope"]
+    assert pose(rope)[2] - size(rope)[2] / 2 >= 2.5                          # rope ends above the drone
+    for n, v in vis.items():
         if n.startswith(("cart_", "rail_")):
-            z = float(m.findtext("pose").split()[2]); h = float(m.findtext(".//box/size").split()[2])
-            assert z + h / 2 <= wg.LOW_TOP                                    # flown over like debris
+            assert pose(v)[2] + size(v)[2] / 2 <= wg.LOW_TOP                 # flown over like debris
     falls = [b for b in spec["obstacles"] if b["kind"] == "rooffall"]
-    for m in props:
-        if "_chunk_" in m.get("name"):
-            ned_y, ned_x = (float(v) for v in m.findtext("pose").split()[:2])   # SDF poses are ENU (east, north)
-            s = max(float(v) for v in m.findtext(".//box/size").split())
+    for n, v in vis.items():
+        if "_chunk_" in n:
+            ned_y, ned_x = pose(v)[:2]                                        # SDF poses are ENU (east, north)
+            s = max(size(v))
             assert any(abs(ned_x - b["x"]) <= b["sx"] / 2 + 0.15 + s / 2 and abs(ned_y - b["y"]) <= b["sy"] / 2 + 0.15 + s / 2
                        for b in falls)
+    assert len(world.findall("model")) < 100                                  # obstacles + target + pads + props
 
 
 def test_plaques_never_look_like_a_target():

@@ -237,7 +237,20 @@ def world_sdf(spec, name) -> str:
             sets += _visual_box(f"timber_post_{k}_{s}", px, py, 1.8, 0.3, 0.3, 3.6, "timber")
         cap = (0.3, DRIFT + 0.6) if along_x else (DRIFT + 0.6, 0.3)
         sets += _visual_box(f"timber_cap_{k}", cx, cy, 3.72, cap[0], cap[1], 0.25, "timber")
-    return sdf.replace("  </world>\n</sdf>\n", sets + _decor(spec) + "  </world>\n</sdf>\n")
+    return sdf.replace("  </world>\n</sdf>\n", _merge_props(sets + _decor(spec)) + "  </world>\n</sdf>\n")
+
+
+def _merge_props(models):
+    """All props as visuals of ONE static model (mine_props): ~150 separate models made the Gazebo server and GUI grow
+    past the memory floor (mines6 readiness, 2026-10-28: MemAvailable 1226 < 1229 MiB); one model with many visuals
+    looks the same and costs one entity."""
+    import re
+    parts = re.findall(r'<model name="([^"]+)">.*?<pose>([^<]+)</pose>.*?<visual name="visual">(.*?)</visual>.*?</model>',
+                       models, flags=re.S)
+    assert len(parts) == models.count("<model name="), "every prop must become one visual"
+    visuals = "".join(f'<visual name="{n}"><pose>{p}</pose>{body}</visual>' for n, p, body in parts)
+    return (f'    <model name="mine_props">\n      <static>true</static>\n      <link name="link">{visuals}</link>\n'
+            '    </model>\n')
 
 
 def _decor(spec):
