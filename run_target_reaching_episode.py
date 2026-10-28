@@ -76,7 +76,11 @@ SPEED_WINDOW_S = 25.0           # s wall, same as the pre-flight stability windo
 MEM_START_MIB = 1.2 * 1024      # MemAvailable required before reset/take-off
 MEM_FLOOR_MIB = 600.0           # MemAvailable required before every step
 PX4_MAX_AGE_S = 1.0             # PX4UAVEnv.TAKEOFF_TELEMETRY_MAX_AGE; PX4 link (local-position receipt) freshness
-CAMERA_MAX_AGE_S = 1.5          # PX4UAVEnv.PERCEPTION_MAX_AGE
+CAMERA_MAX_AGE_S = 2.5          # camera (perception) freshness. Raised from 1.5 (= PX4UAVEnv.PERCEPTION_MAX_AGE) with the
+                                # user's approval (2026-10-28): mine worlds show intermittent 1.5-1.7 s camera rendering
+                                # stalls unrelated to load. Obstacle avoidance uses the LiDAR (own freshness checks,
+                                # unchanged); the camera only finds the target; the env still treats a detection older
+                                # than PERCEPTION_MAX_AGE as no detection.
 MAX_SAMPLE_GAP_S = 5.0          # a longer telemetry gap inside the window invalidates it
 # PX4 HRT updates about once per simulated second (~2.9 s wall at 0.35x). Its progress may be no older than
 # the window's own gap limit; a longer silence fails the window anyway.

@@ -150,7 +150,7 @@ def test_very_slow_simulation_never_passes():
 def test_whole_simulation_stall_fails_on_the_camera_clock_first():
     guard, sim, _ = make()
     sim.run(guard, 30)
-    sim.run(guard, 2.0, sim_runs=False)                             # nothing advances; PX4 link still alive
+    sim.run(guard, 3.0, sim_runs=False)                             # nothing advances; PX4 link still alive
     v = guard.check()
     assert not v["ok"] and v["reason"] == "camera_clock_stale"
 
@@ -231,8 +231,17 @@ def test_px4_link_loss_fails_within_one_second_even_with_fresh_hrt():
 def test_camera_stall_with_running_px4_fails_on_the_camera():
     guard, sim, _ = make()
     sim.run(guard, 30)
-    sim.run(guard, 2.0, camera=False)
+    sim.run(guard, 3.0, camera=False)                               # beyond CAMERA_MAX_AGE_S (2.5 s)
     assert guard.check()["reason"] == "camera_clock_stale"
+
+
+def test_short_camera_stall_is_tolerated():
+    """Mine worlds show intermittent 1.5-1.7 s camera rendering stalls; up to CAMERA_MAX_AGE_S (2.5 s, approved
+    2026-10-28) the flight continues (obstacle avoidance uses the LiDAR, with its own freshness checks)."""
+    guard, sim, _ = make()
+    sim.run(guard, 30)
+    sim.run(guard, 2.0, camera=False)
+    assert guard.check()["ok"]
 
 
 @pytest.mark.parametrize("hrt_speed, camera_speed", [(0.45, 0.30), (0.30, 0.45)])
@@ -271,7 +280,7 @@ def test_the_035_floor_is_unchanged(speed, ok):
 def test_guard_constants_are_pinned():
     assert (runner.SPEED_FLOOR, runner.SPEED_WINDOW_S, runner.MEM_START_MIB, runner.MEM_FLOOR_MIB) == \
         (0.35, 25.0, 1.2 * 1024, 600.0)
-    assert (runner.PX4_MAX_AGE_S, runner.CAMERA_MAX_AGE_S, runner.MAX_SAMPLE_GAP_S) == (1.0, 1.5, 5.0)
+    assert (runner.PX4_MAX_AGE_S, runner.CAMERA_MAX_AGE_S, runner.MAX_SAMPLE_GAP_S) == (1.0, 2.5, 5.0)
     assert runner.PX4_HRT_MAX_AGE_S == runner.MAX_SAMPLE_GAP_S and runner.PX4_HRT_STALL_CAMERA_S == 2.0
 
 

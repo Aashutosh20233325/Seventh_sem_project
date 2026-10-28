@@ -7,7 +7,8 @@ checks = {
     "sim_px4>=0.35": (d["sim_px4"] or 0) >= 0.35,
     "status_gap<=2.0": d["status_gap_max"] is not None and d["status_gap_max"] <= 2.0,
     "land_gap<=4.0": d["land_gap_max"] is not None and d["land_gap_max"] <= 4.0,
-    "perception_gap<=1.5": d["perception_gap_max"] is not None and d["perception_gap_max"] <= 1.5,
+    # 2.5 s (was 1.5; approved 2026-10-28, same as run_target_reaching_episode.CAMERA_MAX_AGE_S)
+    "perception_gap<=2.5": d["perception_gap_max"] is not None and d["perception_gap_max"] <= 2.5,
     "camera/depth/perception flowing": d["rgb_hz"] > 0 and d["depth_hz"] > 0 and d["perception_hz"] > 0,
     "lidar>=5Hz": d["lidar_hz"] >= 5,
     "disarmed": st is not None and st[0] == 1, "hold(nav 4)": st is not None and st[1] == 4,

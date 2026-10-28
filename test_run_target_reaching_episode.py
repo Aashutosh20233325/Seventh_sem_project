@@ -145,7 +145,7 @@ def test_guard_insufficient_history_is_not_healthy():
 def test_guard_stale_clock_aborts_even_with_a_good_history(stream):
     guard, feed, _ = make_guard()
     feed.run(guard, 30)
-    feed.run(guard, 2, **{stream: False})                   # the stream stops; the other keeps going
+    feed.run(guard, 3, **{stream: False})                   # the stream stops (beyond the camera's 2.5 s); the other runs
     verdict = guard.check()
     # PX4 data stopping entirely is first a PX4 link loss (local-position receipt > 1.0 s).
     expected = "px4_telemetry_stale" if stream == "px4" else "camera_clock_stale"
