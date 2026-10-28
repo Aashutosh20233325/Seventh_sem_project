@@ -2293,6 +2293,58 @@ def test_failed_hop_beside_target_lands_in_place(monkeypatch):
     assert calls == ["land"]
 
 
+def stuck_environment(module, **node_state):
+    env = make_environment(module)
+    sent = []
+    env.node.send_command = lambda command, p1, p2, **kw: sent.append((command, p1, p2, kw))
+    state = dict(ground_contact=True, landed=False, arming_state=2, vz=0.02, vx=0.01, vy=0.0)
+    state.update(node_state)
+    for k, v in state.items():
+        setattr(env.node, k, v)
+    return env, sent
+
+
+def test_stuck_landing_alerts_and_force_disarms_after_resting(monkeypatch):
+    module = load_environment(monkeypatch)
+    env, sent = stuck_environment(module)
+    stuck = {"since": None, "attempts": 0, "last": None}
+    T = module.PX4UAVEnv.STUCK_LANDING_S
+    assert not env._check_stuck_landing(stuck, now=100.0)               # starts the clock
+    assert not env._check_stuck_landing(stuck, now=100.0 + T - 1)       # not long enough yet
+    with pytest.warns(RuntimeWarning, match="STUCK LANDING"):
+        assert env._check_stuck_landing(stuck, now=100.0 + T)
+    assert sent == [(400, 0.0, 21196.0, {"require_fresh_status": False})]   # forced disarm
+    assert not env._check_stuck_landing(stuck, now=100.0 + T + 1)       # not again right away
+
+
+def test_stuck_landing_is_capped_at_three_attempts(monkeypatch):
+    module = load_environment(monkeypatch)
+    env, sent = stuck_environment(module)
+    stuck = {"since": None, "attempts": 0, "last": None}
+    T = module.PX4UAVEnv.STUCK_LANDING_S
+    env._check_stuck_landing(stuck, now=0.0)
+    with pytest.warns(RuntimeWarning):
+        for k in range(1, 10):
+            env._check_stuck_landing(stuck, now=k * T)
+    assert len(sent) == module.PX4UAVEnv.STUCK_LANDING_ATTEMPTS
+
+
+@pytest.mark.parametrize("state", [
+    dict(ground_contact=False),          # still in the air
+    dict(landed=True),                   # PX4 declared landed: the normal path
+    dict(arming_state=1),                # already disarmed
+    dict(vz=0.5),                        # still descending
+    dict(vx=0.6),                        # still moving sideways
+])
+def test_stuck_landing_never_fires_unless_resting_armed_and_not_landed(monkeypatch, state):
+    module = load_environment(monkeypatch)
+    env, sent = stuck_environment(module, **state)
+    stuck = {"since": None, "attempts": 0, "last": None}
+    for k in range(10):
+        assert not env._check_stuck_landing(stuck, now=k * 10.0)
+    assert sent == [] and stuck["since"] is None
+
+
 def test_step_observation_waits_for_simulation_time(monkeypatch):
     module = load_environment(monkeypatch)
     env = make_environment(module)

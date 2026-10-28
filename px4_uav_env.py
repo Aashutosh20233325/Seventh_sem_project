@@ -204,6 +204,7 @@ class PX4ControllerNode(Node):
         self.heading = 0.0
         self.vx = 0.0
         self.vy = 0.0
+        self.vz = 0.0
         self.heading_valid = False
         self.position_valid = False
         self.position_received_at = None
@@ -243,6 +244,7 @@ class PX4ControllerNode(Node):
         self.command_ack_counter = 0
         self.command_ack_history = deque(maxlen=32)
         self.landed = None
+        self.ground_contact = None
         self.land_detected_received_at = None
         self.landing_complete = False
         # Set once fresh status confirms AUTO_LAND for the current landing
@@ -311,6 +313,7 @@ class PX4ControllerNode(Node):
             self.heading = float(msg.heading)
             self.vx = float(msg.vx)
             self.vy = float(msg.vy)
+            self.vz = float(getattr(msg, "vz", 0.0))
             self.heading_valid = bool(
                 msg.heading_good_for_control and np.isfinite(self.heading)
             )
@@ -467,6 +470,7 @@ class PX4ControllerNode(Node):
 
         with self.condition:
             self.landed = bool(msg.landed)
+            self.ground_contact = bool(getattr(msg, "ground_contact", False))
             self.land_detected_received_at = time.monotonic()
             self._update_landing_complete()
             self.condition.notify_all()
@@ -879,6 +883,11 @@ class PX4UAVEnv(gym.Env):
     # The preserved SITL trace took ~24 s from NAV_LAND to fresh disarmed
     # status; this remains bounded while avoiding a normal close-timeout race.
     LAND_WAIT_TIMEOUT = 30.0
+    # Stuck landing (mines, 2026-10-28): after a landing off the solid pads PX4 reported ground contact but never
+    # "landed", and stayed armed. While close() waits, a vehicle resting this long (ground contact, armed, not landed,
+    # |vz| and horizontal speed small) gets an alert and a forced disarm, at most STUCK_LANDING_ATTEMPTS times.
+    STUCK_LANDING_S = 15.0
+    STUCK_LANDING_ATTEMPTS = 3
     TAKEOFF_STREAM_TIMEOUT = 3.0
     TAKEOFF_STREAM_MIN_DURATION = 1.0
     TAKEOFF_ACK_TIMEOUT = 3.0
@@ -914,7 +923,8 @@ class PX4UAVEnv(gym.Env):
     START_Y = 0.0
     START_YAW = math.pi / 2
     REPOSITION_TOLERANCE = 0.3          # m horizontal
-    BESIDE_TARGET_M = 1.5               # land_beside_target: landing point this far from the target centre
+    BESIDE_TARGET_M = 1.1               # land_beside_target: landing point this far from the target centre (on the
+                                        # target's 3 x 3 m pad, the only solid ground there besides the start pad)
     REPOSITION_Z_TOLERANCE = 0.25       # m
     REPOSITION_YAW_TOLERANCE = math.radians(10.0)
     REPOSITION_SPEED_TOLERANCE = 0.25   # m/s
@@ -2086,11 +2096,13 @@ class PX4UAVEnv(gym.Env):
 
         # Each wait is bounded, while this non-daemon monitor keeps ROS alive
         # until fresh landed-and-disarmed telemetry arrives.
+        stuck = {"since": None, "attempts": 0, "last": None}
         while True:
             try:
                 self._wait_until_landed(timeout=5.0)
                 break
             except TimeoutError:
+                self._check_stuck_landing(stuck)
                 continue
             except Exception as exc:
                 warnings.warn(
@@ -2108,6 +2120,45 @@ class PX4UAVEnv(gym.Env):
             self._close_waiting = False
 
         self._cleanup_ros()
+
+    def _check_stuck_landing(self, stuck, now=None):
+        """Alert and force-disarm a vehicle that rests on something without PX4 declaring it landed (see
+        STUCK_LANDING_S). `stuck` carries the state between calls; returns True when a disarm was sent."""
+        node = self.node
+        now = time.monotonic() if now is None else now
+        with node.condition:
+            resting = (
+                node.ground_contact is True
+                and node.landed is not True
+                and node.arming_state == VehicleStatus.ARMING_STATE_ARMED
+                and abs(getattr(node, "vz", 0.0)) < 0.15
+                and math.hypot(node.vx, node.vy) < 0.2
+            )
+        if not resting:
+            stuck["since"] = None
+            return False
+        if stuck["since"] is None:
+            stuck["since"] = now
+            return False
+        due = stuck["last"] is None or now - stuck["last"] >= self.STUCK_LANDING_S
+        if now - stuck["since"] < self.STUCK_LANDING_S or not due or stuck["attempts"] >= self.STUCK_LANDING_ATTEMPTS:
+            return False
+        stuck["attempts"] += 1
+        stuck["last"] = now
+        warnings.warn(
+            f"STUCK LANDING: resting with ground contact for {now - stuck['since']:.0f} s, armed, not landed "
+            f"(off the solid pads?); sending forced disarm {stuck['attempts']}/{self.STUCK_LANDING_ATTEMPTS}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        try:
+            node.send_command(
+                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0, 21196.0, require_fresh_status=False
+            )
+        except Exception as exc:
+            warnings.warn(f"STUCK LANDING: forced disarm could not be sent: {exc}", RuntimeWarning, stacklevel=2)
+            return False
+        return True
 
     def _schedule_cleanup_after_landing(self):
 

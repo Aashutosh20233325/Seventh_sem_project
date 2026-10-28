@@ -78,10 +78,12 @@ def test_target_is_the_worker_and_the_mine_is_lit(name):
     assert len(world.findall("light[@type='point']")) >= mg.LAMP_JUNCTIONS
     assert world.findall(".//collision/geometry/mesh") == []                # no mesh collision (DART crash)
     terrain = world.find("model[@name='terrain']")
-    floor = terrain.find("link/collision[@name='floor']")
-    assert floor is not None                                                # a landing anywhere is a real landing
-    z = float(terrain.findtext("pose").split()[2]); h = float(floor.findtext("geometry/box/size").split()[2])
-    assert z + h / 2 == pytest.approx(0.0)                                  # top at the floor, below FLYOVER_TOP
+    assert terrain.find("link/collision") is None                           # visual floor only (a floor collision box
+    z = float(terrain.findtext("pose").split()[2])                          # coincided with camera rendering stalls)
+    h = float(terrain.findtext("link/visual/geometry/box/size").split()[2])
+    assert z + h / 2 == pytest.approx(0.0)                                  # visual top at the floor
+    pads = [m for m in world.findall("model") if m.get("name", "").startswith("pad_")]
+    assert len(pads) == 2 and all(m.find(".//collision/geometry/box") is not None for m in pads)   # solid pads
 
 
 def test_worker_model_is_visual_only_and_cc0():
