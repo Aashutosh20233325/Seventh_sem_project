@@ -205,9 +205,9 @@ def world_sdf(spec, name) -> str:
               '<uri>model://rescue_worker/meshes/rescue_randy.dae</uri></mesh></geometry></visual>')
     sdf = sdf[:start] + block[:v0] + worker + block[v1:] + sdf[end:]
     # underground light: dim ambient, weak sun, dark background, lamps over junctions
-    for a, b in (("<ambient>0.4 0.4 0.4 1</ambient>", "<ambient>0.42 0.41 0.4 1</ambient>"),
+    for a, b in (("<ambient>0.4 0.4 0.4 1</ambient>", "<ambient>0.6 0.59 0.58 1</ambient>"),
                  ("<background>0.7 0.7 0.7 1</background>", "<background>0.08 0.08 0.09 1</background>"),
-                 ("<diffuse>0.904 0.904 0.904 1</diffuse>", "<diffuse>0.35 0.34 0.32 1</diffuse>")):
+                 ("<diffuse>0.904 0.904 0.904 1</diffuse>", "<diffuse>0.7 0.68 0.65 1</diffuse>")):
         assert sdf.count(a) == 1, a
         sdf = sdf.replace(a, b)
     # flat textured floor instead of the (flat) terrain mesh, rock texture on rock, roof falls and debris

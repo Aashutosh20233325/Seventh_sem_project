@@ -14,7 +14,7 @@
     <atmosphere type="adiabatic"/>
     <scene>
       <grid>false</grid>
-      <ambient>0.42 0.41 0.4 1</ambient>
+      <ambient>0.6 0.59 0.58 1</ambient>
       <background>0.08 0.08 0.09 1</background>
       <shadows>true</shadows>
     </scene>
@@ -43,7 +43,7 @@
       <cast_shadows>true</cast_shadows>
       <intensity>1</intensity>
       <direction>0.001 0.625 -0.78</direction>
-      <diffuse>0.35 0.34 0.32 1</diffuse>
+      <diffuse>0.7 0.68 0.65 1</diffuse>
       <specular>0.271 0.271 0.271 1</specular>
       <attenuation>
         <range>2000</range>
