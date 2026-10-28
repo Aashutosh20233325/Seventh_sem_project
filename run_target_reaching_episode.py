@@ -471,6 +471,9 @@ def main(argv=None):
                         "the baseline flies the approach; explorer actions pass the same LiDAR safety filter")
     p.add_argument("--terrain-following", action="store_true",
                    help="SITL only: hold the take-off height above the current ground (downward range, /uav/agl_range)")
+    p.add_argument("--land-beside-target", action="store_true",
+                   help="SITL only (mines): after success land 1.5 m beside the target instead of the straight-line return "
+                        "to the start (which would cross rock); a timeout lands in place")
     p.add_argument("--policy", type=Path,
                    help="policy behind the always-on LiDAR safety filter: numpy_policy .npz (torch-free, for flight) "
                         "or SB3 PPO .zip (default: baseline controller)")
@@ -510,14 +513,16 @@ def main(argv=None):
         target = sar_task.load_target(world)
         record(log, "world", variant=sar_task.selected_world_variant(), path=str(world),
                sha256=sar_task.file_sha256(world), target_ned=[target.x_ned, target.y_ned],
-               terrain_following=bool(args.terrain_following) and not args.standin, max_steps=args.max_steps)
+               terrain_following=bool(args.terrain_following) and not args.standin, max_steps=args.max_steps,
+               land_beside_target=bool(args.land_beside_target) and not args.standin)
         if args.standin:
             from sar_standin_env import SarStandInEnv
             env, guard = SarStandInEnv(max_steps=args.max_steps), None   # offline: no simulator clock or memory
             lidar_age = lambda: 0.0                 # noqa: E731  (stand-in LiDAR is computed every step)
         else:
             from px4_uav_env import PX4UAVEnv
-            env = PX4UAVEnv(terrain_following=args.terrain_following, max_steps=args.max_steps)
+            env = PX4UAVEnv(terrain_following=args.terrain_following, max_steps=args.max_steps,
+                            land_beside_target=args.land_beside_target)
             guard = RuntimeGuard(px4_telemetry(env), terrain=px4_terrain(env) if args.terrain_following else None)
             lidar_age = env.observation_age
         controller = None if predict is None else PolicyController(predict, lidar_age)

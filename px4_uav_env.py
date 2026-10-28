@@ -914,6 +914,7 @@ class PX4UAVEnv(gym.Env):
     START_Y = 0.0
     START_YAW = math.pi / 2
     REPOSITION_TOLERANCE = 0.3          # m horizontal
+    BESIDE_TARGET_M = 1.5               # land_beside_target: landing point this far from the target centre
     REPOSITION_Z_TOLERANCE = 0.25       # m
     REPOSITION_YAW_TOLERANCE = math.radians(10.0)
     REPOSITION_SPEED_TOLERANCE = 0.25   # m/s
@@ -921,10 +922,13 @@ class PX4UAVEnv(gym.Env):
     REPOSITION_WALL_TIMEOUT = 120.0     # s wall ceiling
     STEP_DURATION = 0.1                 # s of simulation time per action
 
-    def __init__(self, terrain_following=False, max_steps=None):
+    def __init__(self, terrain_following=False, max_steps=None, land_beside_target=False):
 
         super().__init__()
         self.terrain_following = bool(terrain_following)
+        # Mines: after success, land beside the target (deliver and stay) instead of the straight-line return to the
+        # start, which would cross solid rock; a timeout lands in place.
+        self.land_beside_target = bool(land_beside_target)
 
         # --------------------------------------------------
         # Same action interface as old environment
@@ -1700,6 +1704,27 @@ class PX4UAVEnv(gym.Env):
             )
         self._enter_safe_state()
 
+    def _land_beside_target(self):
+        """Hop to BESIDE_TARGET_M from the target on the side the vehicle came from (just flown, so clear of rock),
+        facing the target, then the safe-state landing. Any failure lands in place."""
+        with self.node.condition:
+            self._episode_active = False
+            self.node.action[:] = 0.0
+            x, y = self.node.x, self.node.y
+        tx, ty = self.target.x_ned, self.target.y_ned
+        d = math.hypot(x - tx, y - ty)
+        ux, uy = ((x - tx) / d, (y - ty) / d) if d > 1e-3 else (1.0, 0.0)
+        px, py = tx + ux * self.BESIDE_TARGET_M, ty + uy * self.BESIDE_TARGET_M
+        try:
+            self._fly_to(px, py, self.node.TAKEOFF_TARGET_Z, math.atan2(ty - py, tx - px))
+        except Exception as exc:
+            warnings.warn(
+                f"Hop beside the target failed; landing in place instead: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self._enter_safe_state()
+
     def _confirm_ground_before_flight(self, timeout):
         """Before any flight command: bounded wait for fresh disarmed + landed telemetry.
 
@@ -1977,7 +2002,11 @@ class PX4UAVEnv(gym.Env):
         self.previous_action = action.copy()
         observation = self._convert_observation(raw_observation)
 
-        if outcome.reason in ("success", "timeout"):
+        if getattr(self, "land_beside_target", False) and outcome.reason == "success":
+            self._land_beside_target()
+        elif getattr(self, "land_beside_target", False) and outcome.reason == "timeout":
+            self._enter_safe_state()                     # no straight-line return through rock: land where we are
+        elif outcome.reason in ("success", "timeout"):
             self._return_to_start_then_land()
         elif outcome.terminated or outcome.truncated:
             # Collision (proximity, attitude, or failsafe): land where we are.

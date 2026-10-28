@@ -47,6 +47,7 @@ RUNNER_ARGS=""
 [ "$MODE" = explore ] && RUNNER_ARGS="--policy $POLICY --explorer --max-steps 2000"
 [ "$OFFSET" != 0 ] && RUNNER_ARGS="$RUNNER_ARGS --start-yaw-offset-deg $OFFSET"
 [ "$HEIGHT" = tf ] && RUNNER_ARGS="$RUNNER_ARGS --terrain-following"
+case "$VARIANT" in gen_mine_*) RUNNER_ARGS="$RUNNER_ARGS --land-beside-target";; esac   # mines: never return through rock
 echo "demo: name $NAME, mode $MODE, world $VARIANT, start offset $OFFSET, height $HEIGHT, runner args: ${RUNNER_ARGS:-none}"
 memlog() {  # every 10 s; flags memory exhaustion risk (MemAvailable < 600 MiB or swap used > 2.5 GiB)
   while true; do

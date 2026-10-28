@@ -213,8 +213,14 @@ def world_sdf(spec, name) -> str:
     v0 = sdf.index('<visual name="visual"><geometry><mesh><uri>terrain.obj</uri>')
     v1 = sdf.index("</visual>", v0) + len("</visual>")
     size = 2 * (wg.AREA + 3)
-    sdf = sdf[:v0] + (f'<visual name="visual"><pose>0 0 -0.05 0 0 0</pose><geometry><box><size>{size:g} {size:g} 0.1</size>'
-                      f'</box></geometry>{_material("floor", "0.85 0.85 0.85 1")}</visual>') + sdf[v1:]
+    # the floor is also a collision box (top at height 0): a landing anywhere in the mine is a real landing (generated
+    # worlds otherwise only have pad boxes and a safety plane 0.3 m below; flight 3 on 2026-10-28 settled on that plane)
+    floor = f'<geometry><box><size>{size:g} {size:g} 0.1</size></box></geometry>'
+    sdf = sdf[:v0] + (f'<collision name="floor">{floor}</collision><visual name="visual">{floor}'
+                      f'{_material("floor", "0.85 0.85 0.85 1")}</visual>') + sdf[v1:]
+    m = '    <model name="terrain">\n      <static>true</static>\n'
+    assert sdf.count(m) == 1
+    sdf = sdf.replace(m, m + "      <pose>0 0 -0.05 0 0 0</pose>\n")      # model pose: read by sar_standin_env.load_walls
     for kind in ("rock", "rooffall", "debris"):
         c = wg.COLORS[kind]
         sdf = sdf.replace(f"<material><ambient>{c}</ambient><diffuse>{c}</diffuse></material>",

@@ -77,6 +77,11 @@ def test_target_is_the_worker_and_the_mine_is_lit(name):
     assert all("1 0 0" not in (m.text or "") for m in target.iter("diffuse"))
     assert len(world.findall("light[@type='point']")) >= mg.LAMP_JUNCTIONS
     assert world.findall(".//collision/geometry/mesh") == []                # no mesh collision (DART crash)
+    terrain = world.find("model[@name='terrain']")
+    floor = terrain.find("link/collision[@name='floor']")
+    assert floor is not None                                                # a landing anywhere is a real landing
+    z = float(terrain.findtext("pose").split()[2]); h = float(floor.findtext("geometry/box/size").split()[2])
+    assert z + h / 2 == pytest.approx(0.0)                                  # top at the floor, below FLYOVER_TOP
 
 
 def test_worker_model_is_visual_only_and_cc0():

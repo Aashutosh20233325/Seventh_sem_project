@@ -2237,6 +2237,62 @@ def test_failed_return_falls_back_to_landing_in_place(monkeypatch):
     np.testing.assert_array_equal(env.node.action, [0.0, 0.0])
 
 
+@pytest.mark.parametrize("at_max_steps,distance,expected", [
+    (False, 0.5, "beside"),        # success: land beside the target (mines)
+    (True, 10.0, "land"),          # timeout: land in place, never the straight-line return through rock
+])
+def test_land_beside_target_mode_never_returns_to_start(monkeypatch, at_max_steps, distance, expected):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.land_beside_target = True
+    if at_max_steps:
+        env.current_step = env.max_steps - 1
+    env._distance_to_target = lambda: distance
+    env._collision_detected = lambda raw: False
+    calls = []
+    env._return_to_start_then_land = lambda: calls.append("return")
+    env._land_beside_target = lambda: calls.append("beside")
+    env._enter_safe_state = lambda: calls.append("land")
+
+    env._step_after_action(np.array([0.2, 0.0], dtype=np.float32), 0.9 if not at_max_steps else 10.0, 0)
+
+    assert calls == [expected]
+
+
+def test_land_beside_target_hops_to_the_approach_side_facing_the_target(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.target = SimpleNamespace(x_ned=3.0, y_ned=-3.0)
+    env.node.x, env.node.y = 3.0, -3.6               # arrived from the west (smaller y)
+    flown, calls = [], []
+    env._fly_to = lambda x, y, z, yaw: flown.append((x, y, z, yaw))
+    env._enter_safe_state = lambda: calls.append("land")
+
+    module.PX4UAVEnv._land_beside_target(env)
+
+    (x, y, z, yaw), = flown
+    assert (x, y) == pytest.approx((3.0, -3.0 - module.PX4UAVEnv.BESIDE_TARGET_M))
+    assert z == env.node.TAKEOFF_TARGET_Z and yaw == pytest.approx(math.pi / 2)   # facing east, toward the target
+    assert calls == ["land"] and not env._episode_active
+
+
+def test_failed_hop_beside_target_lands_in_place(monkeypatch):
+    module = load_environment(monkeypatch)
+    env = make_environment(module)
+    env.target = SimpleNamespace(x_ned=3.0, y_ned=-3.0)
+    calls = []
+
+    def fail(*a):
+        raise TimeoutError("blocked")
+    env._fly_to = fail
+    env._enter_safe_state = lambda: calls.append("land")
+
+    with pytest.warns(RuntimeWarning, match="landing in place"):
+        module.PX4UAVEnv._land_beside_target(env)
+
+    assert calls == ["land"]
+
+
 def test_step_observation_waits_for_simulation_time(monkeypatch):
     module = load_environment(monkeypatch)
     env = make_environment(module)
