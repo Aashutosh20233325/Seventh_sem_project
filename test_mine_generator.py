@@ -14,7 +14,7 @@ import sar_standin_env as se
 import sar_task
 import world_generator as wg
 
-COMMITTED = {"gen_mine_s1": 1, "gen_mine_s2": 2, "gen_mine_s3": 3}
+COMMITTED = {"gen_mine_s1": 1, "gen_mine_s2": 2, "gen_mine_s3": 3, "gen_mine_s20": 20}
 
 
 @pytest.mark.parametrize("seed", [1, 7, 42])
