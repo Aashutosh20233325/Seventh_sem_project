@@ -198,6 +198,8 @@ class ExplorerController:
         self.failed = set()
         self.progress = (math.inf, 0)
         self.last = None
+        self.diag = {}               # step-log diagnostics: candidate blocks before/after the failed filter, with gain,
+                                     # last goal-drop reason (logging only)
 
     # ---------- planning ----------
 
@@ -211,7 +213,9 @@ class ExplorerController:
             key = (i * RES // 2, j * RES // 2)
             if key not in best or dist[i, j] < dist[best[key]]:
                 best[key] = (i, j)
-        return [c for c in best.values() if c not in self.failed]
+        kept = [c for c in best.values() if c not in self.failed]
+        self.diag["blocks"], self.diag["blocks_unfailed"] = len(best), len(kept)
+        return kept
 
     def _plan(self, x, y, heading=0.0):
         start = self.map.cell(x, y)
@@ -231,6 +235,7 @@ class ExplorerController:
                         best = (s, c, h, g)
             if best is not None:
                 scored.append(best)
+        self.diag["with_gain"] = len(scored)
         if not scored:
             return None, 0
         score, c, heading, gain = max(scored)
@@ -244,6 +249,7 @@ class ExplorerController:
         self.path = [] if c == start else (path_to(parent, start, c) or [])
         if c != start and not self.path:
             self.failed.add(c)
+            self.diag["drop"] = "no_path"
             return None, len(scored)
         if self.goal is None or (self.goal[0], self.goal[1]) != c:
             self.progress = (math.inf, self.steps)           # the stuck timer restarts only for a new goal
@@ -260,6 +266,7 @@ class ExplorerController:
         if self._at_goal(x, y):
             err = wrap(self.goal[2] - heading)              # at the viewpoint: turn to the best viewing heading
             if abs(err) < HEADING_TOLERANCE:
+                self.diag["drop"] = "reached"
                 self.failed.add((self.goal[0], self.goal[1]))  # done here: never this viewpoint again (a sliver of
                 self.goal, self.since_plan = None, REPLAN_STEPS  # its predicted view may stay unseen), plan the next
                 return 0.0, 0.0
@@ -358,10 +365,12 @@ class ExplorerController:
             if d < self.progress[0] - 0.3:
                 self.progress = (d, self.steps)
             elif self.steps - self.progress[1] > STUCK_STEPS:
+                self.diag["drop"] = "no_progress"
                 self.failed.add((self.goal[0], self.goal[1]))
                 self.goal, self.since_plan = None, REPLAN_STEPS
             elif self.path and self.map.blocked()[self.path[0]]:
                 self.since_plan = REPLAN_STEPS
+        self.diag.pop("drop", None) if self.goal is not None else None
         if self.goal is None or self.since_plan >= REPLAN_STEPS:
             _, n_candidates = self._plan(x, y, heading)
             self.since_plan = 0
@@ -377,6 +386,7 @@ class ExplorerController:
         self.last = {"mode": "EXPLORE", "reason": reason, "goal": None if gx is None else [round(gx, 2), round(gy, 2)],
                      "goal_heading": None if self.goal is None else round(self.goal[2], 2),
                      "score": None if self.goal is None else round(self.goal[3], 1), "candidates": n_candidates,
-                     "searched_cells": int(self.map.searched.sum()), "filter": finfo["reason"],
+                     "searched_cells": int(self.map.searched.sum()), "failed": len(self.failed),
+                     "diag": dict(self.diag), "filter": finfo["reason"],
                      "original": finfo["original"]}
         return action
