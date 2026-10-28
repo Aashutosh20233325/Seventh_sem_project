@@ -249,11 +249,16 @@ def _decor(spec):
     rng = np.random.default_rng([spec["seed"], 77])
     out = ""
     sx0, sy0 = NODES[START[0]], NODES[START[1]]
-    # borehole casing: a ring of 12 steel segments on the rock top (z 4.0-4.4) around the start junction
+    # rock roof over the start junction with a 1.4 m square opening (the borehole), casing ring around the opening
+    hole, slab = 1.4, DRIFT + 0.4
+    w = (slab - hole) / 2
+    for k, (dx, dy, sx, sy) in enumerate(((0, (hole + w) / 2, slab, w), (0, -(hole + w) / 2, slab, w),
+                                          ((hole + w) / 2, 0, w, hole), (-(hole + w) / 2, 0, w, hole))):
+        out += _visual_box(f"borehole_roof_{k}", sx0 + dx, sy0 + dy, ROCK_TOP - 0.15, sx, sy, 0.3, "rock")
     for k in range(12):
         a = 2 * math.pi * k / 12
-        out += _visual_box_rot(f"borehole_casing_{k}", sx0 + 2.0 * math.cos(a), sy0 + 2.0 * math.sin(a), ROCK_TOP + 0.2,
-                               1.1, 0.25, 0.4, a + math.pi / 2, "steel")
+        out += _visual_box_rot(f"borehole_casing_{k}", sx0 + 0.9 * math.cos(a), sy0 + 0.9 * math.sin(a), ROCK_TOP + 0.2,
+                               0.5, 0.15, 0.4, a + math.pi / 2, "steel")
     # drilling frame: four legs from the pillar tops (+-3.2, +-3.2) to a crown 9 m up, crown block, rope to 2.6 m
     top = 9.0
     for k, (dx, dy) in enumerate(((1, 1), (1, -1), (-1, 1), (-1, -1))):
@@ -279,7 +284,7 @@ def _decor(spec):
             out += _visual_box_rot(f"rooffall_{k}_timber_{j}", b["x"] + float(rng.uniform(-0.3, 0.3)) * b["sx"],
                                    b["y"] + float(rng.uniform(-0.3, 0.3)) * b["sy"], top_z + 0.1, 3.0, 0.25, 0.25,
                                    float(rng.uniform(0, math.pi)), "timber", roll=0.0, pitch=float(rng.uniform(-0.3, 0.3)))
-        out += _visual_plaque(f"sign_rooffall_{k}", b["x"], b["y"], top_z + 0.45, 2.0, 1.0, "sign_rooffall")
+        out += _visual_plaque(f"sign_rooffall_{k}", b["x"], b["y"], top_z + 0.8, 2.0, 1.0, "sign_rooffall")
     # rails along every open drift (junction centre to junction centre), two carts away from start and target
     opens = _open_drifts(spec)
     for k, ((i0, j0), (i1, j1)) in enumerate(opens):
@@ -328,9 +333,10 @@ def _visual_leg(name, x, y, z, length, tilt, heading_ned):
 
 
 def _visual_plaque(name, x, y, z, sx, sy, texture):
-    """A thin horizontal plaque (face up, readable from above with north up)."""
-    return (f'    <model name="{name}">\n      <static>true</static>\n      <pose>{y:.3f} {x:.3f} {z:.3f} 0 0 0</pose>\n'
-            f'      <link name="link"><visual name="visual"><geometry><box><size>{sx:.3f} {sy:.3f} 0.02</size></box>'
+    """A thin horizontal plaque, face up, sx along east: turned so the text reads left to right in the top-down view
+    (north up)."""
+    return (f'    <model name="{name}">\n      <static>true</static>\n      <pose>{y:.3f} {x:.3f} {z:.3f} 0 0 {math.pi / 2:.4f}'
+            f'</pose>\n      <link name="link"><visual name="visual"><geometry><box><size>{sy:.3f} {sx:.3f} 0.02</size></box>'
             f'</geometry>{_material(texture, "1 1 1 1")}</visual></link>\n    </model>\n')
 
 
