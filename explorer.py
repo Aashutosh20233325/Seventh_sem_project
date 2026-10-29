@@ -43,10 +43,12 @@ SEARCH_HALF = 19.0           # m: the search area, [-SEARCH_HALF, SEARCH_HALF] i
 N = int(round(2 * HALF / RES))
 UNKNOWN, FREE, OCC = 0, 1, 2
 HIT_MARGIN = 29.0            # m: a sector reading below this hit something (max range 30 m)
-HIT_MARK_MAX = 15.0          # m: hits beyond this are not marked occupied (a sector's minimum lies anywhere across its
+HIT_MARK_MAX = 8.0           # m: hits beyond this are not marked occupied (a sector's minimum lies anywhere across its
                              # 5.5 deg wedge but is marked on the centre ray: far hits seen at a shallow angle put
                              # phantom walls inside free tunnels); the wedge is still marked free up to the reading.
-                             # 15 m: mines 93 -> 100/100 found (fresh seeds), open worlds unchanged (stand-in, 2026-10-28)
+                             # 15 -> 8 m: live gen_mine_s20 (mines12) map replay 457 -> 183 phantom wall cells, the
+                             # tunnels behind the vehicle no longer sealed (miner reachable again); stand-in mines
+                             # 98 -> 99/100 success, 100/100 found (4 m: 94, 6 m: 95: too little wall knowledge)
 CAM_HALF_FOV = 0.6           # rad (stand-in model: 0.5 * 1.204)
 CAM_MIN, CAM_MAX = 1.0, 10.0  # m of ground in view from 1.8 m with the 30 deg down-pitched camera
 INFLATE = 1.0                # m clearance from obstacles for planning
@@ -64,6 +66,9 @@ TURN_COST = 1.0              # m of path per rad of turning: a viewpoint's cost 
                              # direction (or the current heading, at the start cell) to its viewing heading
 CRUISE_SPEED = 1.0           # speed action on a straight path segment (scaled by cos of the heading error)
 VIEW_TURN = 1.0              # largest turn action when turning to the viewing heading at a goal
+NO_GOAL_STEPS = 30           # steps without any goal: forget the wall marks (refreshed from LiDAR at once; the searched
+RECOVERIES = 2               # record is kept) and the failed viewpoints, replan; after RECOVERIES such resets, fly back
+                             # to the start and report search_complete (never turn in place until a guard stops it)
 HEADINGS = [k * math.pi / 4 for k in range(8)]
 NEIGHBOURS = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
               (1, 1, math.sqrt(2)), (1, -1, math.sqrt(2)), (-1, 1, math.sqrt(2)), (-1, -1, math.sqrt(2))]
@@ -198,6 +203,10 @@ class ExplorerController:
         self.failed = set()
         self.progress = (math.inf, 0)
         self.last = None
+        self.no_goal = 0
+        self.recoveries = 0
+        self.returning = False       # nothing left to search after RECOVERIES resets: back to the start
+        self.search_complete = False  # at the start after returning: the runner ends the episode
         self.diag = {}               # step-log diagnostics: candidate blocks before/after the failed filter, with gain,
                                      # last goal-drop reason (logging only)
 
@@ -322,6 +331,25 @@ class ExplorerController:
         self.goal = (goal[0], goal[1], math.atan2(ty - cy[k], tx - cx[k]), 0.0)
         return True
 
+    def _return_home(self, obs, x, y, heading):
+        """Nothing left to search: follow a path back to the start, then hold still and report search_complete."""
+        if math.hypot(x, y) < GOAL_TOLERANCE:
+            self.search_complete = True
+            raw, reason = np.zeros(2, np.float32), "search_complete"
+        else:
+            if self.goal is None or self.since_plan >= REPLAN_STEPS or not self.path:
+                self._plan_to(x, y, 0.0, 0.0)
+                self.since_plan = 0
+            self.since_plan += 1
+            raw, reason = np.array(self._follow(x, y, heading), np.float32), "return_to_start"
+            if self.goal is not None and self._at_goal(x, y):
+                raw = np.array([0.4, float(np.clip(2.0 * wrap(math.atan2(-y, -x) - heading), -1, 1))], np.float32)
+        action, finfo = self.safety_filter.filter(obs, raw, self.lidar_age())
+        self.last = {"mode": "EXPLORE", "reason": reason, "goal": [0.0, 0.0], "searched_cells": int(self.map.searched.sum()),
+                     "failed": len(self.failed), "diag": dict(self.diag), "filter": finfo["reason"],
+                     "original": finfo["original"]}
+        return action
+
     def act(self, obs):
         x, y, heading = self.pose()
         self.steps += 1
@@ -359,6 +387,8 @@ class ExplorerController:
                          "filter": finfo["reason"], "original": finfo["original"]}
             return action
         n_candidates = None
+        if self.returning:
+            return self._return_home(obs, x, y, heading)
         if self.goal is not None:                            # give up a goal without progress, or a blocked path
             gx, gy = self.map.centre(self.goal[0], self.goal[1])
             d = math.hypot(gx - x, gy - y)
@@ -375,8 +405,20 @@ class ExplorerController:
             _, n_candidates = self._plan(x, y, heading)
             self.since_plan = 0
         self.since_plan += 1
+        self.no_goal = self.no_goal + 1 if self.goal is None else 0
+        if self.no_goal >= NO_GOAL_STEPS:
+            self.no_goal = 0
+            if self.recoveries < RECOVERIES:                 # the map may have sealed itself: forget walls, replan
+                self.recoveries += 1
+                self.map.state[self.map.state == OCC] = UNKNOWN
+                self.failed.clear()
+                self.since_plan = REPLAN_STEPS
+                self.diag["recovery"] = self.recoveries
+            else:
+                self.returning, self.goal, self.path = True, None, []
+                self.diag["recovery"] = "return_to_start"
         if self.goal is None:
-            raw = np.array([0.0, 0.6], np.float32)             # nothing left to plan: keep looking around
+            raw = np.array([0.0, 0.6], np.float32)             # nothing left to plan: look around (refreshes LiDAR)
             reason = "no_goal"
         else:
             raw = np.array(self._follow(x, y, heading), np.float32)

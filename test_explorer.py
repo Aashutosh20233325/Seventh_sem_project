@@ -210,3 +210,55 @@ def test_existing_controllers_log_as_before(tmp_path):
     log = tmp_path / "e.jsonl"
     runner.main(["--standin", "--log", str(log)])                 # baseline: no per-step policy record
     assert all("policy" not in json.loads(l) for l in log.read_text().splitlines() if '"step"' in l)
+
+
+def test_no_goal_recovers_then_returns_to_the_start_and_reports_search_complete(monkeypatch):
+    """With nothing to plan, the explorer forgets its wall marks and failed viewpoints after NO_GOAL_STEPS (keeping the
+    searched record), at most RECOVERIES times; then it flies back to the start and sets search_complete there,
+    instead of turning in place until a guard stops it."""
+    pose = {"p": (6.0, 0.0, 0.0)}
+    c = ex.ExplorerController(Inner(), lambda: pose["p"])
+    monkeypatch.setattr(c, "_plan", lambda *a: (setattr(c, "goal", None), (None, 0))[1])
+    c.act(OPEN)
+    searched = int(c.map.searched.sum())
+    i, j = c.map.cell(10.0, 5.0)
+    for k in range(1, ex.RECOVERIES + 1):
+        c.map.state[i, j] = ex.OCC
+        c.failed.add((1, 1))
+        for _ in range(ex.NO_GOAL_STEPS):
+            c.act(OPEN)
+        assert c.recoveries == k and c.map.state[i, j] != ex.OCC and not c.failed and not c.returning
+        assert int(c.map.searched.sum()) >= searched                  # the searched record is kept
+    for _ in range(ex.NO_GOAL_STEPS):
+        c.act(OPEN)
+    assert c.returning and not c.search_complete
+    a = c.act(OPEN)
+    assert c.last["reason"] == "return_to_start" and abs(a[1]) > 0.5   # the start is behind it: turns first
+    pose["p"] = (6.0, 0.0, math.pi)
+    a = c.act(OPEN)
+    assert c.last["reason"] == "return_to_start" and a[0] > 0.5       # facing the start: flies back
+    pose["p"] = (0.3, 0.1, math.pi)
+    a = c.act(OPEN)
+    assert c.search_complete and c.last["reason"] == "search_complete" and np.allclose(a, 0.0)
+
+
+def test_runner_ends_the_episode_on_search_complete(tmp_path):
+    import json
+    import run_target_reaching_episode as r
+    from sar_standin_env import SarStandInEnv
+
+    class Done:
+        search_complete = False
+        last = {"mode": "EXPLORE"}
+        n = 0
+
+        def act(self, obs):
+            self.n += 1
+            self.search_complete = self.n >= 5
+            return np.zeros(2, np.float32)
+    log = tmp_path / "e.jsonl"
+    with open(log, "w") as f:
+        result = r.run(SarStandInEnv(max_steps=100), f, 100, controller=Done())
+    assert result == "search_complete"
+    rows = [json.loads(line) for line in open(log)]
+    assert sum(row["event"] == "step" for row in rows) == 5 and rows[-1]["reason"] == "search_complete"

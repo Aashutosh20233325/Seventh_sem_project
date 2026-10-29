@@ -441,6 +441,9 @@ def run(env, log, max_steps, guard=None, controller=None, reset_options=None):
         if terminated or truncated:
             result = info.get("reason")
             break
+        if getattr(controller, "search_complete", False):    # explorer: nothing left to search, back at the start
+            result = "search_complete"
+            break
     record(log, "episode_end", reason=result)
     return result
 
