@@ -72,7 +72,7 @@ wait $SERIES_PID
 kill $VIEW_PID 2>/dev/null
 
 # --- afterwards: mission map + summary card ---
-RUN=$(ls -d runs/sar_demo_20261018/restart_${NAME}_1_* 2>/dev/null | tail -1)
+RUN=$(ls -d runs/sar_demo_20261018/restart_${NAME}_1_* 2>/dev/null | grep -v "_driver$" | tail -1)
 if [ $REHEARSE -eq 0 ] && [ -n "$RUN" ] && [ -s "$RUN/logs/episode.jsonl" ] && grep -q '"event": "step"' "$RUN/logs/episode.jsonl"; then
   echo
   echo "Making the mission map animation and summary card..."
