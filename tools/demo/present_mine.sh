@@ -46,19 +46,43 @@ mkdir -p $(dirname $OUT)
 setsid bash tools/demo/run_demo_series.sh $NAME "$MODE $WORLD 0 tf" > $OUT 2>&1 < /dev/null &
 SERIES_PID=$!
 
-# --- top-down view: once per Gazebo window, when its camera service is up (read-only otherwise) ---
+# --- top-down view, kept: set once the Gazebo window's camera service is up, then every 5 s read the camera pose
+# (/gui/camera/pose) and set it again if it has drifted (scene load, window resize); every 30 s if the pose cannot be
+# read. Only the GUI camera is touched. ---
 (
   export GZ_PARTITION=uav_sar_validation_20261018_instance1
-  seen=""
+  set_view() {
+    timeout 10 gz service -s /gui/move_to/pose --reqtype gz.msgs.GUICamera --reptype gz.msgs.Boolean --timeout 3000 \
+      --req "pose: {position: {x: 4.0, y: 4.0, z: $VIEW_Z.0}, orientation: {w: 0.5, x: -0.5, y: 0.5, z: 0.5}}" > /dev/null 2>&1
+  }
+  view_ok() {   # 0 = top-down at the right place, 1 = drifted, 2 = pose unreadable
+    local p
+    p=$(timeout 4 gz topic -e -t /gui/camera/pose -n 1 2>/dev/null | tr -d '\n')
+    [ -n "$p" ] || return 2
+    echo "$p" | awk -v Z=$VIEW_Z '{
+      s=$0; px=py=pz="";
+      if (match(s, /position *\{[^}]*\}/)) { b=substr(s, RSTART, RLENGTH);
+        if (match(b, /x: *[-0-9.e]+/)) px=substr(b, RSTART+3, RLENGTH-3)+0;
+        if (match(b, /y: *[-0-9.e]+/)) py=substr(b, RSTART+3, RLENGTH-3)+0;
+        if (match(b, /z: *[-0-9.e]+/)) pz=substr(b, RSTART+3, RLENGTH-3)+0 }
+      if (pz == "") exit 2
+      d = (px-4)^2 + (py-4)^2; dz = pz - Z
+      exit (d < 2.25 && dz < 1.5 && dz > -1.5) ? 0 : 1 }'
+  }
+  seen=""; gui=""; last_set=0
   while kill -0 $SERIES_PID 2>/dev/null; do
-    gui=$(pgrep -f '^gz sim -g' | head -1)
-    if [ -n "$gui" ] && [[ " $seen " != *" $gui "* ]]; then
+    g=$(pgrep -f '^gz sim -g' | head -1)
+    if [ -n "$g" ] && [[ " $seen " != *" $g "* ]]; then
       for i in $(seq 60); do gz service -l 2>/dev/null | grep -q '^/gui/move_to/pose$' && break; sleep 2; done
       sleep 6
-      timeout 10 gz service -s /gui/move_to/pose --reqtype gz.msgs.GUICamera --reptype gz.msgs.Boolean --timeout 3000 \
-        --req "pose: {position: {x: 4.0, y: 4.0, z: $VIEW_Z.0}, orientation: {w: 0.5, x: -0.5, y: 0.5, z: 0.5}}" \
-        > /dev/null 2>&1 && echo "[$(date +%T)] Gazebo view set to top-down ($VIEW_Z m). Please do not move the view."
-      seen="$seen $gui"
+      set_view && echo "[$(date +%T)] Gazebo view set to top-down ($VIEW_Z m). Please do not move the view."
+      seen="$seen $g"; gui=$g; last_set=$SECONDS
+    elif [ -n "$gui" ] && kill -0 $gui 2>/dev/null; then
+      view_ok; rc=$?
+      if [ $rc -eq 1 ] || { [ $rc -eq 2 ] && [ $((SECONDS - last_set)) -ge 30 ]; }; then
+        set_view && { [ $rc -eq 1 ] && echo "[$(date +%T)] Gazebo view had moved: top-down view restored."; }
+        last_set=$SECONDS
+      fi
     fi
     sleep 5
   done
