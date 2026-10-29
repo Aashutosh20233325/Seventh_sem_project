@@ -51,7 +51,9 @@ SERIES_PID=$!
 # read. Only the GUI camera is touched. ---
 (
   export GZ_PARTITION=uav_sar_validation_20261018_instance1
-  set_view() {
+  set_view() {   # follow mode (the GUI camera chasing the drone) overrides move_to: switch it off first
+    timeout 10 gz service -s /gui/follow --reqtype gz.msgs.StringMsg --reptype gz.msgs.Boolean --timeout 3000 \
+      --req 'data: ""' > /dev/null 2>&1
     timeout 10 gz service -s /gui/move_to/pose --reqtype gz.msgs.GUICamera --reptype gz.msgs.Boolean --timeout 3000 \
       --req "pose: {position: {x: 4.0, y: 4.0, z: $VIEW_Z.0}, orientation: {w: 0.5, x: -0.5, y: 0.5, z: 0.5}}" > /dev/null 2>&1
   }
