@@ -70,7 +70,8 @@ def main(series_dir, series_out):
                 elif m:
                     say(f"  readiness window {m[1][1]}/6: simulation speed {float(m[2]):.2f}x -> {m[3]}")
                 elif line.startswith("== T_r"):
-                    say("*** READINESS PASSED. TAKEOFF IN ABOUT 30 SECONDS: START RECORDING NOW. ***")
+                    say("Readiness passed (rehearsal: no takeoff)." if "presentr_" in p else
+                        "*** READINESS PASSED. TAKEOFF IN ABOUT 30 SECONDS: START RECORDING NOW. ***")
                 elif line.startswith("preflight state"):
                     say("Pre-flight check: " + ("ok" if " ok " in line else line))
                 elif line.startswith("== SUPERVISED DEMO FLIGHT"):
@@ -82,7 +83,8 @@ def main(series_dir, series_out):
                 elif line.startswith("SUPPLY PACKET DROPPED"):
                     say("Supply packet dropped beside the miner.")
                 elif line.startswith("== gated stop"):
-                    say("Landed. Shutting the simulator down (about 1-2 minutes).")
+                    say("Shutting the simulator down (about 1-2 minutes)." if "presentr_" in p else
+                        "Landed. Shutting the simulator down (about 1-2 minutes).")
                 elif "ABORT" in line or "aborted" in line or "Traceback" in line:
                     say("Note: " + line[:160])
         if episode is None:
